@@ -123,6 +123,17 @@ class ReportData:
 
 # Parser
 
+def _normalize_imports(imports) -> list[dict]:
+    """imports가 dict({dll: {dll, imports}}) 또는 list 두 형태로 올 수 있음 → 항상 list[dict] 반환"""
+    if not imports:
+        return []
+    if isinstance(imports, dict):
+        return list(imports.values())
+    if isinstance(imports, list):
+        return [i if isinstance(i, dict) else {"dll": str(i), "imports": []} for i in imports]
+    return []
+
+
 class ReportParser:
 
     @staticmethod
@@ -207,7 +218,7 @@ class ReportParser:
             pe_osversion=str(pe.get("osversion", "")),
             pe_machine_type=str(pe.get("machine_type", "")),
             pe_sections=sections,
-            pe_imports=list(pe.get("imports") or []),
+            pe_imports=_normalize_imports(pe.get("imports")),
             pe_exports=list(pe.get("exports") or []),
             pe_versioninfo=list(pe.get("versioninfo") or []),
             pe_digital_signers=list(pe.get("digital_signers") or []),
