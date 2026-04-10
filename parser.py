@@ -299,3 +299,195 @@ class ReportParser:
                 calls=calls,
             ))
         return result
+
+
+# ─── ThreatSummary + ReportInterpreter ───────────────────────────────────────
+
+@dataclass
+class ThreatSummary:
+    verdict: str                    # "악성" / "의심" / "정상" / "분석 실패"
+    verdict_color: str              # CSS 색상 코드
+    behavior_tags: list[str]        # ["안티 디버깅", "정보 탈취", ...]
+    key_ttps: list[tuple[str, str]] # [("T1055", "프로세스 인젝션"), ...]
+    cape_summary: str               # "Unpacked PE 추출됨 — 패킹 악성코드 의심"
+    one_liner: str                  # "MalScore 8/10 — 안티분석 + 정보탈취 패턴"
+
+
+class ReportInterpreter:
+    """
+    ReportData → ThreatSummary 순수 변환기.
+    UI 코드 없음. 상태 없음. summarize() 하나만 공개.
+    """
+
+    # ── 규칙 1: 시그니처 카테고리 → 한국어 행동 태그 ─────────────────────
+    _CATEGORY_TAGS: dict[str, str] = {
+        "antidebug":       "안티 디버깅",
+        "antivm":          "가상환경 탐지",
+        "antisandbox":     "샌드박스 우회",
+        "antiav":          "보안 제품 비활성화",
+        "infostealer":     "정보 탈취",
+        "ransomware":      "랜섬웨어",
+        "persistence":     "지속성 확보",
+        "injection":       "프로세스 인젝션",
+        "evasion":         "탐지 우회",
+        "dropper":         "드로퍼",
+        "network":         "네트워크 통신",
+        "packer":          "패킹/난독화",
+        "exploit":         "취약점 악용",
+        "keylogger":       "키로거",
+        "rootkit":         "루트킷",
+        "banker":          "뱅킹 악성코드",
+        "rat":             "원격 접근 트로이목마",
+        "spyware":         "스파이웨어",
+        "bootkit":         "부트킷",
+        "credential":      "자격증명 탈취",
+        "downloader":      "다운로더",
+        "worm":            "웜",
+        "backdoor":        "백도어",
+        "trojan":          "트로이목마",
+        "stealth":         "은닉",
+        "uac":             "UAC 우회",
+        "privilege":       "권한 상승",
+        "discovery":       "시스템 정보 수집",
+        "encryption":      "암호화",
+        "lateral":         "내부 이동",
+        "c2":              "C2 통신",
+        "crypto":          "암호화폐 악용",
+    }
+
+    # ── 규칙 2: MITRE TTP ID → 기법 설명 ────────────────────────────────
+    _TTP_DESC: dict[str, str] = {
+        "T1027":  "난독화/패킹",
+        "T1055":  "프로세스 인젝션",
+        "T1082":  "시스템 정보 수집",
+        "T1033":  "사용자 계정 발견",
+        "T1003":  "자격증명 덤핑",
+        "T1112":  "레지스트리 조작",
+        "T1543":  "서비스/드라이버 등록",
+        "T1562":  "보안 제품 비활성화",
+        "T1059":  "명령어 실행",
+        "T1547":  "시작 시 자동 실행",
+        "T1083":  "파일/디렉터리 탐색",
+        "T1057":  "프로세스 탐색",
+        "T1012":  "레지스트리 조회",
+        "T1518":  "소프트웨어 탐색",
+        "T1016":  "네트워크 설정 수집",
+        "T1049":  "네트워크 연결 탐색",
+        "T1071":  "C2 프로토콜 사용",
+        "T1095":  "Non-Application Layer 프로토콜",
+        "T1105":  "파일 전송/다운로드",
+        "T1140":  "파일 복호화/디코딩",
+        "T1202":  "간접 명령 실행",
+        "T1218":  "시스템 도구 악용",
+        "T1497":  "가상화 환경 탐지",
+        "T1548":  "권한 상승",
+        "T1553":  "코드 서명 우회",
+        "T1564":  "아티팩트 은닉",
+        "T1574":  "DLL 하이재킹",
+    }
+
+    # ── 규칙 3: verdict 판정 ─────────────────────────────────────────────
+    _VERDICT_MAP = [
+        # (malscore 최솟값, verdict 텍스트, 색상)
+        (7, "악성",      "#b91c1c"),
+        (4, "의심",      "#9a3412"),
+        (1, "잠재 위협", "#854d0e"),
+        (0, "정상",      "#15803d"),
+    ]
+
+    @staticmethod
+    def summarize(data: ReportData) -> ThreatSummary:
+        # 분석 실패
+        if data.malstatus.lower() in ("failed", ""):
+            return ThreatSummary(
+                verdict="분석 실패",
+                verdict_color="#737373",
+                behavior_tags=[],
+                key_ttps=[],
+                cape_summary="",
+                one_liner="샌드박스 분석이 완료되지 않았습니다.",
+            )
+
+        verdict, verdict_color = ReportInterpreter._get_verdict(data.malscore)
+        behavior_tags = ReportInterpreter._get_behavior_tags(data.signatures)
+        key_ttps = ReportInterpreter._get_key_ttps(data.ttps)
+        cape_summary = ReportInterpreter._get_cape_summary(data.cape_payloads)
+        one_liner = ReportInterpreter._build_one_liner(
+            data.malscore, verdict, behavior_tags, cape_summary
+        )
+
+        return ThreatSummary(
+            verdict=verdict,
+            verdict_color=verdict_color,
+            behavior_tags=behavior_tags,
+            key_ttps=key_ttps,
+            cape_summary=cape_summary,
+            one_liner=one_liner,
+        )
+
+    # ── 내부 헬퍼 ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_verdict(malscore: int) -> tuple[str, str]:
+        for min_score, label, color in ReportInterpreter._VERDICT_MAP:
+            if malscore >= min_score:
+                return label, color
+        return "정상", "#15803d"
+
+    @staticmethod
+    def _get_behavior_tags(signatures: list[Signature]) -> list[str]:
+        seen: set[str] = set()
+        tags: list[str] = []
+        for sig in signatures:
+            for cat in sig.categories:
+                # 카테고리 문자열에서 접두사 매핑 (예: "antidebug_windows" → "antidebug")
+                key = next(
+                    (k for k in ReportInterpreter._CATEGORY_TAGS if cat.lower().startswith(k)),
+                    None
+                )
+                if key is None:
+                    # 매핑 없으면 카테고리 자체를 태그로 (첫 글자 대문자)
+                    tag = cat.replace("_", " ").title()
+                else:
+                    tag = ReportInterpreter._CATEGORY_TAGS[key]
+                if tag not in seen:
+                    seen.add(tag)
+                    tags.append(tag)
+        return tags
+
+    @staticmethod
+    def _get_key_ttps(ttps: list[TTP]) -> list[tuple[str, str]]:
+        seen: set[str] = set()
+        result: list[tuple[str, str]] = []
+        for ttp in ttps:
+            for tid in ttp.ttps:
+                # 상위 기법만 (T1027.002 → T1027)
+                parent = tid.split(".")[0]
+                if parent in seen:
+                    continue
+                seen.add(parent)
+                desc = ReportInterpreter._TTP_DESC.get(parent, "")
+                result.append((parent, desc))
+                if len(result) >= 6:
+                    return result
+        return result
+
+    @staticmethod
+    def _get_cape_summary(payloads: list[dict]) -> str:
+        if not payloads:
+            return ""
+        types = list(dict.fromkeys(
+            str(p.get("cape_type", "Unknown")) for p in payloads
+        ))
+        return f"{len(payloads)}개 페이로드 추출: " + ", ".join(types)
+
+    @staticmethod
+    def _build_one_liner(
+        malscore: int, verdict: str, tags: list[str], cape_summary: str
+    ) -> str:
+        parts = [f"MalScore {malscore}/10 — {verdict}"]
+        if tags:
+            parts.append(" + ".join(tags[:3]))
+        if cape_summary:
+            parts.append(cape_summary)
+        return "  |  ".join(parts)

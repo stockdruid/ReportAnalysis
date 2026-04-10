@@ -1,0 +1,11 @@
+# 설정/문서
+CLAUDE.md
+CAPEv2_Report_Analyzer_Plan.md
+
+# 도구
+.omc/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
