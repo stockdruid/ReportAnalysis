@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import json
+import os
 
 
 # Dataclasses
@@ -135,9 +136,17 @@ def _normalize_imports(imports) -> list[dict]:
 
 
 class ReportParser:
+    # 200 MB 초과 리포트는 메모리 고갈 방지를 위해 거부
+    _MAX_REPORT_SIZE = 200 * 1024 * 1024
 
     @staticmethod
     def load(path: str) -> ReportData:
+        size = os.path.getsize(path)
+        if size > ReportParser._MAX_REPORT_SIZE:
+            raise ValueError(
+                f"리포트 파일이 너무 큽니다 "
+                f"({size // 1024 // 1024} MB > 200 MB 한계)."
+            )
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
         return ReportParser._parse(raw)
@@ -230,11 +239,8 @@ class ReportParser:
 
     @staticmethod
     def _parse_signatures(sigs: list) -> list[Signature]:
-        result = []
-        for s in sigs:
-            if not isinstance(s, dict):
-                continue
-            result.append(Signature(
+        return [
+            Signature(
                 name=str(s.get("name", "")),
                 description=str(s.get("description", "")),
                 severity=int(s.get("severity", 1)),
@@ -243,21 +249,20 @@ class ReportParser:
                 families=list(s.get("families") or []),
                 references=list(s.get("references") or []),
                 data=list(s.get("data") or []),
-            ))
-        return result
+            )
+            for s in sigs if isinstance(s, dict)
+        ]
 
     @staticmethod
     def _parse_ttps(ttps: list) -> list[TTP]:
-        result = []
-        for t in ttps:
-            if not isinstance(t, dict):
-                continue
-            result.append(TTP(
+        return [
+            TTP(
                 signature=str(t.get("signature", "")),
                 ttps=list(t.get("ttps") or []),
                 mbcs=list(t.get("mbcs") or []),
-            ))
-        return result
+            )
+            for t in ttps if isinstance(t, dict)
+        ]
 
     @staticmethod
     def _parse_suricata(s: dict) -> dict:

@@ -18,6 +18,13 @@ main.py - CAPEv2 Report Analyzer
 from __future__ import annotations
 import sys
 import os
+import re
+
+try:
+    import keyring as _keyring
+    _KEYRING_OK = True
+except ImportError:
+    _KEYRING_OK = False
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
@@ -207,64 +214,27 @@ class OverviewTab(QWidget):
         vbox.addWidget(threat_card)
 
         # ── 1. 파일 요약 카드 ──────────────────────────────────────────────
-        summary_card = _card_widget()
-        s_lay = QVBoxLayout(summary_card)
-        s_lay.setContentsMargins(16, 16, 16, 16)
-        s_lay.setSpacing(10)
-
+        summary_card, s_lay = _card_with_vbox()
         title = QLabel(fi.name if fi.name else "Unknown")
         title.setStyleSheet(f"color:{BLACK}; font-size:18px; font-weight:700;")
         s_lay.addWidget(title)
 
-        meta_row = QHBoxLayout()
-        meta_row.setSpacing(24)
-        for label, val in [
+        s_lay.addLayout(_meta_row([
             ("크기", f"{fi.size:,} bytes"),
             ("타입", fi.file_type[:60] if fi.file_type else "—"),
             ("패키지", data.info.package),
             ("분석 머신", data.info.machine),
             ("소요 시간", f"{data.info.duration}초"),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(2)
-            k = QLabel(label.upper())
-            k.setStyleSheet(
-                f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                f" font-family:Consolas,monospace;"
-            )
-            v = QLabel(val)
-            v.setStyleSheet(f"color:{BLACK}; font-size:13px; font-weight:500;")
-            v.setWordWrap(True)
-            col.addWidget(k)
-            col.addWidget(v)
-            meta_row.addLayout(col)
-        meta_row.addStretch()
-        s_lay.addLayout(meta_row)
-
-        # 분석 시간
-        time_row = QHBoxLayout()
-        time_row.setSpacing(24)
-        for label, val in [
-            ("시작", data.info.started),
-            ("종료", data.info.ended),
-            ("상태", data.malstatus),
-            ("CAPE 탐지", fi.cape_type if fi.cape_type else "—"),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(2)
-            k = QLabel(label.upper())
-            k.setStyleSheet(
-                f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                f" font-family:Consolas,monospace;"
-            )
-            v = QLabel(val)
-            v.setStyleSheet(f"color:{BLACK}; font-size:13px;")
-            col.addWidget(k)
-            col.addWidget(v)
-            time_row.addLayout(col)
-        time_row.addStretch()
-        s_lay.addLayout(time_row)
-
+        ]))
+        s_lay.addLayout(_meta_row(
+            [
+                ("시작", data.info.started),
+                ("종료", data.info.ended),
+                ("상태", data.malstatus),
+                ("CAPE 탐지", fi.cape_type if fi.cape_type else "—"),
+            ],
+            val_style=f"color:{BLACK}; font-size:13px;",
+        ))
         vbox.addWidget(summary_card)
 
         # ── 2. 해시 카드 ───────────────────────────────────────────────────
@@ -281,86 +251,44 @@ class OverviewTab(QWidget):
         vbox.addWidget(HashCard("파일 해시", hash_items))
 
         # ── 3. PE 정보 ─────────────────────────────────────────────────────
-        pe_card = _card_widget()
-        pe_lay = QVBoxLayout(pe_card)
-        pe_lay.setContentsMargins(16, 16, 16, 16)
-        pe_lay.setSpacing(12)
+        pe_card, pe_lay = _card_with_vbox(spacing=12)
 
         pe_title = QLabel("PE 정보")
         pe_title.setStyleSheet(f"color:{BLACK}; font-size:14px; font-weight:700;")
         pe_lay.addWidget(pe_title)
 
-        # PE 기본 메타
-        pe_meta = QHBoxLayout()
-        pe_meta.setSpacing(24)
-        for label, val in [
-            ("Timestamp",   fi.pe_timestamp),
-            ("ImageBase",   fi.pe_imagebase),
-            ("EntryPoint",  fi.pe_entrypoint),
-            ("OS Version",  fi.pe_osversion),
-            ("Machine",     fi.pe_machine_type),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(2)
-            k = QLabel(label.upper())
-            k.setStyleSheet(
-                f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                f" font-family:Consolas,monospace;"
-            )
-            v = QLabel(val if val else "—")
-            v.setStyleSheet(f"color:{BLACK}; font-size:12px; font-family:Consolas,monospace;")
-            col.addWidget(k)
-            col.addWidget(v)
-            pe_meta.addLayout(col)
-        pe_meta.addStretch()
-        pe_lay.addLayout(pe_meta)
+        pe_lay.addLayout(_meta_row(
+            [
+                ("Timestamp",  fi.pe_timestamp),
+                ("ImageBase",  fi.pe_imagebase),
+                ("EntryPoint", fi.pe_entrypoint),
+                ("OS Version", fi.pe_osversion),
+                ("Machine",    fi.pe_machine_type),
+            ],
+            val_style=_MONO_VAL_STYLE,
+        ))
 
         if fi.pe_pdbpath:
-            pdb_row = QHBoxLayout()
-            pdb_lbl = QLabel("PDB")
-            pdb_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                f" font-family:Consolas,monospace; min-width:60px;"
-            )
-            pdb_val = QLabel(fi.pe_pdbpath)
-            pdb_val.setStyleSheet(
-                f"color:{BLACK}; font-size:12px; font-family:Consolas,monospace;"
-            )
-            pdb_val.setWordWrap(True)
-            pdb_row.addWidget(pdb_lbl)
-            pdb_row.addWidget(pdb_val, 1)
-            pe_lay.addLayout(pdb_row)
+            pe_lay.addLayout(_kv_inline_row("PDB", fi.pe_pdbpath, key_width=60))
 
         # 섹션 테이블
         if fi.pe_sections:
-            sec_lbl = QLabel("섹션")
-            sec_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:11px; font-weight:600; margin-top:4px;"
-            )
-            pe_lay.addWidget(sec_lbl)
-
+            pe_lay.addWidget(_section_label("섹션"))
             sec_table = InfoTable(["이름", "VA", "크기", "특성", "엔트로피"])
-            sec_table.setMaximumHeight(28 + len(fi.pe_sections) * 30)
+            _fixed_height_table(sec_table, len(fi.pe_sections))
             for sec in fi.pe_sections:
                 sec_table.add_row([
-                    sec.name,
-                    sec.virtual_address,
-                    sec.size_of_data,
-                    sec.characteristics,
-                    f"{sec.entropy:.2f}",
+                    sec.name, sec.virtual_address, sec.size_of_data,
+                    sec.characteristics, f"{sec.entropy:.2f}",
                 ])
             sec_table.fit_columns()
             pe_lay.addWidget(sec_table)
 
         # VersionInfo
         if fi.pe_versioninfo:
-            ver_lbl = QLabel("Version Info")
-            ver_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:11px; font-weight:600; margin-top:4px;"
-            )
-            pe_lay.addWidget(ver_lbl)
+            pe_lay.addWidget(_section_label("Version Info"))
             ver_table = InfoTable(["Key", "Value"])
-            ver_table.setMaximumHeight(28 + len(fi.pe_versioninfo) * 30)
+            _fixed_height_table(ver_table, len(fi.pe_versioninfo))
             for entry in fi.pe_versioninfo:
                 ver_table.add_row([
                     str(entry.get("name", "")),
@@ -371,27 +299,20 @@ class OverviewTab(QWidget):
 
         # Imports
         if fi.pe_imports:
-            imp_lbl = QLabel(f"임포트 DLL ({len(fi.pe_imports)}개)")
-            imp_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:11px; font-weight:600; margin-top:4px;"
-            )
-            pe_lay.addWidget(imp_lbl)
+            pe_lay.addWidget(_section_label(f"임포트 DLL ({len(fi.pe_imports)}개)"))
             imp_table = InfoTable(["DLL", "함수 수"])
-            imp_table.setMaximumHeight(28 + min(len(fi.pe_imports), 10) * 30)
+            _fixed_height_table(imp_table, len(fi.pe_imports), cap=10)
             for imp in fi.pe_imports:
-                dll = str(imp.get("dll", ""))
-                funcs = imp.get("imports", [])
-                imp_table.add_row([dll, str(len(funcs))])
+                imp_table.add_row([
+                    str(imp.get("dll", "")),
+                    str(len(imp.get("imports", []))),
+                ])
             imp_table.fit_columns()
             pe_lay.addWidget(imp_table)
 
         # Digital Signers
         if fi.pe_digital_signers:
-            sig_lbl = QLabel("디지털 서명")
-            sig_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:11px; font-weight:600; margin-top:4px;"
-            )
-            pe_lay.addWidget(sig_lbl)
+            pe_lay.addWidget(_section_label("디지털 서명"))
             for signer in fi.pe_digital_signers:
                 s = QLabel(str(signer))
                 s.setStyleSheet(f"color:{BLACK}; font-size:12px;")
@@ -406,16 +327,13 @@ class OverviewTab(QWidget):
         # ── 4. YARA 매치 ───────────────────────────────────────────────────
         all_yara = fi.yara + fi.cape_yara
         if all_yara:
-            yara_card = _card_widget()
-            y_lay = QVBoxLayout(yara_card)
-            y_lay.setContentsMargins(16, 16, 16, 16)
-            y_lay.setSpacing(8)
+            yara_card, y_lay = _card_with_vbox(spacing=8)
             y_title = QLabel(f"YARA 매치 ({len(all_yara)}개)")
             y_title.setStyleSheet(f"color:{BLACK}; font-size:14px; font-weight:700;")
             y_lay.addWidget(y_title)
 
             yara_table = InfoTable(["Rule", "소스"])
-            yara_table.setMaximumHeight(28 + len(all_yara) * 30)
+            _fixed_height_table(yara_table, len(all_yara))
             for name in fi.yara:
                 yara_table.add_row([name, "YARA"])
             for name in fi.cape_yara:
@@ -427,10 +345,7 @@ class OverviewTab(QWidget):
         # ── 5. VirusTotal ──────────────────────────────────────────────────
         vt = fi.virustotal
         if vt and isinstance(vt, dict) and not vt.get("error"):
-            vt_card = _card_widget()
-            vt_lay = QVBoxLayout(vt_card)
-            vt_lay.setContentsMargins(16, 16, 16, 16)
-            vt_lay.setSpacing(8)
+            vt_card, vt_lay = _card_with_vbox(spacing=8)
             vt_title = QLabel("VirusTotal")
             vt_title.setStyleSheet(f"color:{BLACK}; font-size:14px; font-weight:700;")
             vt_lay.addWidget(vt_title)
@@ -497,9 +412,7 @@ class SignaturesTab(QWidget):
         self._layout.addWidget(filter_bar)
 
         # ── 본문: 좌(테이블) + 우(상세 패널) 스플리터 ──────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setStyleSheet(f"QSplitter::handle {{ background:{GRAY_200}; }}")
+        splitter = _make_splitter()
 
         # 좌: 시그니처 테이블
         self._table = InfoTable(["", "이름", "설명", "카테고리", "신뢰도"])
@@ -609,19 +522,7 @@ class SignaturesTab(QWidget):
         meta_pairs.append(("신뢰도", f"{sig.confidence}%"))
 
         for k, v in meta_pairs:
-            row = QHBoxLayout()
-            k_lbl = QLabel(k.upper())
-            k_lbl.setFixedWidth(70)
-            k_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                f" font-family:Consolas,monospace;"
-            )
-            v_lbl = QLabel(v)
-            v_lbl.setStyleSheet(f"color:{BLACK}; font-size:13px;")
-            v_lbl.setWordWrap(True)
-            row.addWidget(k_lbl)
-            row.addWidget(v_lbl, 1)
-            layout.addLayout(row)
+            layout.addLayout(_kv_inline_row(k, v))
 
         # 구분선
         line = QFrame()
@@ -635,22 +536,15 @@ class SignaturesTab(QWidget):
             ev_lbl.setStyleSheet(f"color:{BLACK}; font-size:13px; font-weight:600;")
             layout.addWidget(ev_lbl)
             for entry in sig.data:
-                ev_card = _card_widget()
-                ev_lay = QVBoxLayout(ev_card)
-                ev_lay.setContentsMargins(10, 8, 10, 8)
-                ev_lay.setSpacing(4)
-                for ek, ev in (entry.items() if isinstance(entry, dict) else [("값", entry)]):
+                ev_card, ev_lay = _card_with_vbox(margins=(10, 8, 10, 8), spacing=4)
+                pairs = entry.items() if isinstance(entry, dict) else [("값", entry)]
+                for ek, ev in pairs:
                     ev_row = QHBoxLayout()
                     ek_lbl = QLabel(str(ek).upper())
                     ek_lbl.setFixedWidth(80)
-                    ek_lbl.setStyleSheet(
-                        f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                        f" font-family:Consolas,monospace;"
-                    )
+                    ek_lbl.setStyleSheet(_MONO_KEY_STYLE)
                     ev_val = QLabel(self._fmt_evidence(ev))
-                    ev_val.setStyleSheet(
-                        f"color:{BLACK}; font-size:12px; font-family:Consolas,monospace;"
-                    )
+                    ev_val.setStyleSheet(_MONO_VAL_STYLE)
                     ev_val.setWordWrap(True)
                     ev_row.addWidget(ek_lbl)
                     ev_row.addWidget(ev_val, 1)
@@ -705,6 +599,9 @@ class SignaturesTab(QWidget):
 class ATTACKTab(QWidget):
     # MITRE ATT&CK 기법 링크 베이스
     _MITRE_BASE = "https://attack.mitre.org/techniques/"
+    # TTP ID 형식 검증 — 리포트 데이터 신뢰 불가
+    _TTP_MAIN_RE = re.compile(r'^T\d{4}$')
+    _TTP_SUB_RE  = re.compile(r'^\d{3}$')
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -734,16 +631,9 @@ class ATTACKTab(QWidget):
             else:
                 rows.append(("—", "", ttp.signature, mbcs_str))
 
-        # 헤더 바
-        header_bar = QWidget()
-        header_bar.setStyleSheet(f"background:{WHITE}; border-bottom:1px solid {GRAY_200};")
-        hb_lay = QHBoxLayout(header_bar)
-        hb_lay.setContentsMargins(16, 8, 16, 8)
-        count_lbl = QLabel(f"ATT&CK TTP  {len(rows)}개 (클릭 시 MITRE 링크 열기)")
-        count_lbl.setStyleSheet(f"color:{GRAY_500}; font-size:12px;")
-        hb_lay.addWidget(count_lbl)
-        hb_lay.addStretch()
-        self._layout.addWidget(header_bar)
+        self._layout.addWidget(_header_bar(
+            f"ATT&CK TTP  {len(rows)}개 (클릭 시 MITRE 링크 열기)"
+        ))
 
         # 테이블
         table = InfoTable(["TTP ID", "하위 기법", "연결 시그니처", "MBCS"])
@@ -775,6 +665,11 @@ class ATTACKTab(QWidget):
             return
         main_id = id_item.text()          # 예: T1027
         sub_id  = sub_item.text() if sub_item and sub_item.text() != "—" else ""
+        # 악성 리포트가 TTP ID에 임의 URL/경로 삽입하는 것을 방지
+        if not self._TTP_MAIN_RE.match(main_id):
+            return
+        if sub_id and not self._TTP_SUB_RE.match(sub_id):
+            return
         # T1027 → /T1027/  |  T1027 + 002 → /T1027/002/
         path = main_id + ("/" + sub_id + "/" if sub_id else "/")
         webbrowser.open(self._MITRE_BASE + path)
@@ -793,14 +688,7 @@ class NetworkTab(QWidget):
         s = data.suricata
         total = sum(len(v) for v in s.values())
 
-        # 헤더 바
-        header_bar = QWidget()
-        header_bar.setStyleSheet(f"background:{WHITE}; border-bottom:1px solid {GRAY_200};")
-        hb_lay = QHBoxLayout(header_bar)
-        hb_lay.setContentsMargins(16, 8, 16, 8)
-        hb_lay.addWidget(self._make_count_label(total))
-        hb_lay.addStretch()
-        self._layout.addWidget(header_bar)
+        self._layout.addWidget(_header_bar(f"Suricata 이벤트  {total}개"))
 
         # 서브탭
         sub = QTabWidget()
@@ -830,12 +718,6 @@ class NetworkTab(QWidget):
         self._layout.addWidget(sub)
 
     # ── 서브탭 빌더 ──────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _make_count_label(total: int) -> QLabel:
-        lbl = QLabel(f"Suricata 이벤트  {total}개")
-        lbl.setStyleSheet(f"color:{GRAY_500}; font-size:12px;")
-        return lbl
 
     @staticmethod
     def _make_alerts_tab(items: list) -> QWidget:
@@ -970,21 +852,12 @@ class BehaviorTab(QWidget):
 
         total_calls = sum(len(p.calls) for p in self._procs)
 
-        # ── 헤더 바 ──────────────────────────────────────────────────────
-        header_bar = QWidget()
-        header_bar.setStyleSheet(f"background:{WHITE}; border-bottom:1px solid {GRAY_200};")
-        hb_lay = QHBoxLayout(header_bar)
-        hb_lay.setContentsMargins(16, 8, 16, 8)
-        lbl = QLabel(f"프로세스 {len(self._procs)}개  |  API 호출 {total_calls:,}개")
-        lbl.setStyleSheet(f"color:{GRAY_500}; font-size:12px;")
-        hb_lay.addWidget(lbl)
-        hb_lay.addStretch()
-        self._layout.addWidget(header_bar)
+        self._layout.addWidget(_header_bar(
+            f"프로세스 {len(self._procs)}개  |  API 호출 {total_calls:,}개"
+        ))
 
         # ── 좌(프로세스 목록) + 우(API 호출 테이블) 스플리터 ────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setStyleSheet(f"QSplitter::handle {{ background:{GRAY_200}; }}")
+        splitter = _make_splitter()
 
         # 좌: 프로세스 목록 테이블
         self._proc_table = InfoTable(["PID", "프로세스명", "부모 PID", "API 호출"])
@@ -1094,21 +967,12 @@ class CAPETab(QWidget):
             self._layout.addWidget(EmptyState("CAPE 추출 결과 없음", "추출된 페이로드나 설정값이 없습니다."))
             return
 
-        # ── 헤더 바 ──────────────────────────────────────────────────────
-        header_bar = QWidget()
-        header_bar.setStyleSheet(f"background:{WHITE}; border-bottom:1px solid {GRAY_200};")
-        hb_lay = QHBoxLayout(header_bar)
-        hb_lay.setContentsMargins(16, 8, 16, 8)
-        lbl = QLabel(f"페이로드 {len(data.cape_payloads)}개  |  설정 {len(data.cape_configs)}개")
-        lbl.setStyleSheet(f"color:{GRAY_500}; font-size:12px;")
-        hb_lay.addWidget(lbl)
-        hb_lay.addStretch()
-        self._layout.addWidget(header_bar)
+        self._layout.addWidget(_header_bar(
+            f"페이로드 {len(data.cape_payloads)}개  |  설정 {len(data.cape_configs)}개"
+        ))
 
         # ── 스플리터: 좌(페이로드 목록) + 우(상세) ───────────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setStyleSheet(f"QSplitter::handle {{ background:{GRAY_200}; }}")
+        splitter = _make_splitter()
 
         # 좌: 페이로드 + 설정 목록
         left = QWidget()
@@ -1232,22 +1096,16 @@ class CAPETab(QWidget):
             ("VA",        str(p.get("virtual_address", ""))),
             ("모듈 경로", str(p.get("module_path", ""))),
         ]
-        info_card = _card_widget()
-        ic_lay = QVBoxLayout(info_card)
-        ic_lay.setContentsMargins(12, 12, 12, 12)
-        ic_lay.setSpacing(6)
+        info_card, ic_lay = _card_with_vbox(margins=(12, 12, 12, 12), spacing=6)
         for k, v in info_pairs:
             if not v or v == "0" or v == "0 bytes":
                 continue
             row_lay = QHBoxLayout()
             k_lbl = QLabel(k.upper())
             k_lbl.setFixedWidth(80)
-            k_lbl.setStyleSheet(
-                f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
-                f" font-family:Consolas,monospace;"
-            )
+            k_lbl.setStyleSheet(_MONO_KEY_STYLE)
             v_lbl = QLabel(v)
-            v_lbl.setStyleSheet(f"color:{BLACK}; font-size:12px; font-family:Consolas,monospace;")
+            v_lbl.setStyleSheet(_MONO_VAL_STYLE)
             v_lbl.setWordWrap(True)
             row_lay.addWidget(k_lbl)
             row_lay.addWidget(v_lbl, 1)
@@ -1263,7 +1121,7 @@ class CAPETab(QWidget):
             y_lbl.setStyleSheet(f"color:{BLACK}; font-size:13px; font-weight:600;")
             layout.addWidget(y_lbl)
             y_table = InfoTable(["Rule", "소스"])
-            y_table.setMaximumHeight(28 + len(all_yara) * 30)
+            _fixed_height_table(y_table, len(all_yara))
             for name in yara_names:
                 y_table.add_row([name, "YARA"])
             for name in cape_yara_names:
@@ -1426,6 +1284,19 @@ class MainWindow(QMainWindow):
 
 # --- 유틸 --------------------------------------------------------------------
 
+# 공통 스타일 상수 (f-string 중복 제거)
+_MONO_KEY_STYLE = (
+    f"color:{GRAY_500}; font-size:10px; letter-spacing:1px;"
+    f" font-family:Consolas,monospace;"
+)
+_MONO_VAL_STYLE = f"color:{BLACK}; font-size:12px; font-family:Consolas,monospace;"
+_SECTION_LBL_STYLE = (
+    f"color:{GRAY_500}; font-size:11px; font-weight:600; margin-top:4px;"
+)
+_HEADER_BAR_STYLE = f"background:{WHITE}; border-bottom:1px solid {GRAY_200};"
+_SPLITTER_STYLE = f"QSplitter::handle {{ background:{GRAY_200}; }}"
+
+
 def _card_widget() -> QFrame:
     """흰 배경, 둥근 테두리 카드 컨테이너"""
     card = QFrame()
@@ -1436,11 +1307,89 @@ def _card_widget() -> QFrame:
     return card
 
 
-def _clear_layout(layout: QVBoxLayout) -> None:
+def _clear_layout(layout) -> None:
     while layout.count():
         item = layout.takeAt(0)
         if item.widget():
             item.widget().deleteLater()
+
+
+def _card_with_vbox(margins=(16, 16, 16, 16), spacing: int = 10) -> tuple[QFrame, QVBoxLayout]:
+    """_card_widget + 내부 QVBoxLayout을 한 번에 생성."""
+    card = _card_widget()
+    lay = QVBoxLayout(card)
+    lay.setContentsMargins(*margins)
+    lay.setSpacing(spacing)
+    return card, lay
+
+
+def _mono_kv_column(label: str, value: str, val_style: str | None = None) -> QVBoxLayout:
+    """대문자 mono 레이블 + 값 2줄 컬럼."""
+    col = QVBoxLayout()
+    col.setSpacing(2)
+    k = QLabel(label.upper())
+    k.setStyleSheet(_MONO_KEY_STYLE)
+    v = QLabel(value if value else "—")
+    v.setStyleSheet(val_style or f"color:{BLACK}; font-size:13px; font-weight:500;")
+    v.setWordWrap(True)
+    col.addWidget(k)
+    col.addWidget(v)
+    return col
+
+
+def _meta_row(pairs: list[tuple[str, str]], val_style: str | None = None) -> QHBoxLayout:
+    """여러 (라벨,값) 컬럼을 한 줄로 배치."""
+    row = QHBoxLayout()
+    row.setSpacing(24)
+    for label, val in pairs:
+        row.addLayout(_mono_kv_column(label, val, val_style))
+    row.addStretch()
+    return row
+
+
+def _kv_inline_row(label: str, value: str, key_width: int = 70) -> QHBoxLayout:
+    """대문자 mono 라벨 + 값 1줄 (가로)."""
+    row = QHBoxLayout()
+    k = QLabel(label.upper())
+    k.setFixedWidth(key_width)
+    k.setStyleSheet(_MONO_KEY_STYLE)
+    v = QLabel(value)
+    v.setStyleSheet(f"color:{BLACK}; font-size:13px;")
+    v.setWordWrap(True)
+    row.addWidget(k)
+    row.addWidget(v, 1)
+    return row
+
+
+def _section_label(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(_SECTION_LBL_STYLE)
+    return lbl
+
+
+def _header_bar(text: str) -> QWidget:
+    """탭 상단의 회색 카운트 라벨이 달린 헤더 바."""
+    bar = QWidget()
+    bar.setStyleSheet(_HEADER_BAR_STYLE)
+    lay = QHBoxLayout(bar)
+    lay.setContentsMargins(16, 8, 16, 8)
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"color:{GRAY_500}; font-size:12px;")
+    lay.addWidget(lbl)
+    lay.addStretch()
+    return bar
+
+
+def _make_splitter() -> QSplitter:
+    sp = QSplitter(Qt.Orientation.Horizontal)
+    sp.setHandleWidth(1)
+    sp.setStyleSheet(_SPLITTER_STYLE)
+    return sp
+
+
+def _fixed_height_table(table: InfoTable, n_rows: int, cap: int | None = None) -> None:
+    rows = min(n_rows, cap) if cap else n_rows
+    table.setMaximumHeight(28 + rows * 30)
 
 
 # --- 진입점 ------------------------------------------------------------------
@@ -1520,10 +1469,12 @@ class _AnalysisWorker(QThread):
 class AnalysisDialog(QDialog):
     """Claude / Gemini API 분석 결과 다이얼로그."""
 
+    # keyring 미사용 시 평문 파일 폴백 경로
     _KEY_PATHS = {
         "claude": os.path.expanduser("~/.cape_analyzer_claude_key"),
         "gemini": os.path.expanduser("~/.cape_analyzer_gemini_key"),
     }
+    _KEYRING_SERVICE = "cape_analyzer"
     _PROVIDERS = [
         ("Claude (Anthropic)", "claude"),
         ("Gemini (Google)",    "gemini"),
@@ -1639,18 +1590,29 @@ class AnalysisDialog(QDialog):
 
     def _load_key(self) -> None:
         provider = self._current_provider()
-        path = self._KEY_PATHS[provider]
-        if os.path.exists(path):
+        key = ""
+        # 1순위: OS 키체인 (Windows Credential Manager / macOS Keychain)
+        if _KEYRING_OK:
             try:
-                with open(path, encoding="utf-8") as f:
-                    key = f.read().strip()
-                if key:
-                    self._api_key = key
-                    self._key_frame.setVisible(False)
-                    self._start_analysis()
-                    return
-            except OSError:
+                stored = _keyring.get_password(self._KEYRING_SERVICE, provider)
+                if stored:
+                    key = stored
+            except Exception:
                 pass
+        # 2순위: 평문 파일 폴백
+        if not key:
+            path = self._KEY_PATHS[provider]
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        key = f.read().strip()
+                except OSError:
+                    pass
+        if key:
+            self._api_key = key
+            self._key_frame.setVisible(False)
+            self._start_analysis()
+            return
         self._key_input.setPlaceholderText(self._PLACEHOLDERS[provider])
         self._key_frame.setVisible(True)
         self._status_lbl.setText("API 키를 입력하세요. 저장되면 다음부터 자동으로 사용합니다.")
@@ -1664,9 +1626,27 @@ class AnalysisDialog(QDialog):
         if provider == "claude" and not key.startswith("sk-"):
             self._status_lbl.setText("올바른 Anthropic API 키를 입력하세요 (sk-ant-... 형식).")
             return
+        # 1순위: OS 키체인에 저장 — 평문 파일보다 안전
+        if _KEYRING_OK:
+            try:
+                _keyring.set_password(self._KEYRING_SERVICE, provider, key)
+                self._api_key = key
+                self._key_frame.setVisible(False)
+                self._start_analysis()
+                return
+            except Exception as e:
+                self._status_lbl.setText(f"키체인 저장 실패, 파일로 폴백: {e}")
+        # 2순위: 평문 파일 저장
         try:
-            with open(self._KEY_PATHS[provider], "w", encoding="utf-8") as f:
+            path = self._KEY_PATHS[provider]
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(key)
+            # 소유자만 읽기/쓰기 가능하도록 권한 설정 (Unix 계열)
+            try:
+                import stat
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+            except (OSError, AttributeError):
+                pass  # Windows에서는 무시
         except OSError as e:
             self._status_lbl.setText(f"키 저장 실패: {e}")
             return
