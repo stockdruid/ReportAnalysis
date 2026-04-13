@@ -1479,24 +1479,14 @@ def _build_prompt(data: ReportData) -> str:
 
     net_section_parts = []
     if alert_sigs:
-        net_section_parts.append("Suricata 알림:
-" + "
-".join(f"- {s}" for s in alert_sigs))
+        net_section_parts.append("Suricata 알림:\n" + "\n".join(f"- {s}" for s in alert_sigs))
     if dns_domains:
-        net_section_parts.append("DNS 요청 도메인:
-" + "
-".join(f"- {d}" for d in dns_domains))
+        net_section_parts.append("DNS 요청 도메인:\n" + "\n".join(f"- {d}" for d in dns_domains))
     if http_urls:
-        net_section_parts.append("HTTP 접속:
-" + "
-".join(f"- {u}" for u in http_urls))
+        net_section_parts.append("HTTP 접속:\n" + "\n".join(f"- {u}" for u in http_urls))
     if tls_snis:
-        net_section_parts.append("TLS SNI:
-" + "
-".join(f"- {s}" for s in tls_snis))
-    net_section = "
-
-".join(net_section_parts) if net_section_parts else f"이벤트 {net_total}건 (세부 IOC 없음)"
+        net_section_parts.append("TLS SNI:\n" + "\n".join(f"- {s}" for s in tls_snis))
+    net_section = "\n\n".join(net_section_parts) if net_section_parts else f"이벤트 {net_total}건 (세부 IOC 없음)"
 
     return f"""다음은 CAPEv2 악성코드 샌드박스 분석 결과입니다. 보안 전문가 관점에서 한국어로 분석해 주세요.
 
