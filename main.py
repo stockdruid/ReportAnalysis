@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QDialog, QLineEdit, QTextEdit, QComboBox,
 )
 from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QGuiApplication
 
 from parser import ReportParser, ReportData, ReportInterpreter
 from widgets import (
@@ -358,6 +358,26 @@ class OverviewTab(QWidget):
             )
             vt_lay.addWidget(ratio_lbl)
             vbox.addWidget(vt_card)
+
+
+        _MAX_STRINGS = 200
+        if fi.strings:
+            str_card, st_lay = _card_with_vbox(spacing=8)
+            clipped = len(fi.strings) > _MAX_STRINGS
+            title_text = (
+                f"Strings ({_MAX_STRINGS}/{len(fi.strings)}개 표시)"
+                if clipped else f"Strings ({len(fi.strings)}개)"
+            )
+            st_title = QLabel(title_text)
+            st_title.setStyleSheet(f"color:{BLACK}; font-size:14px; font-weight:700;")
+            st_lay.addWidget(st_title)
+
+            str_table = InfoTable(["String"])
+            _fixed_height_table(str_table, min(len(fi.strings), _MAX_STRINGS), cap=_MAX_STRINGS)
+            for s in fi.strings[:_MAX_STRINGS]:
+                str_table.add_row([s])
+            st_lay.addWidget(str_table)
+            vbox.addWidget(str_card)
 
         vbox.addStretch()
         scroll.setWidget(content)
@@ -1252,14 +1272,46 @@ class MainWindow(QMainWindow):
         if path:
             self.load_report(path)
 
+    _ASYNC_THRESHOLD = 50 * 1024 * 1024
+
     def load_report(self, path: str) -> None:
         self._status.showMessage(f"로딩 중: {path}")
         try:
-            data = ReportParser.load(path)
-        except Exception as e:
+            size = os.path.getsize(path)
+        except OSError as e:
             self._status.showMessage(f"오류: {e}")
             return
 
+        if size > self._ASYNC_THRESHOLD:
+            self._start_async_load(path)
+        else:
+            try:
+                data = ReportParser.load(path)
+            except Exception as e:
+                self._status.showMessage(f"오류: {e}")
+                return
+            self._apply_report(path, data)
+
+    def _start_async_load(self, path: str) -> None:
+        self._open_btn.setEnabled(False)
+        self._status.showMessage(
+            f"대용량 파일 로딩 중... {os.path.basename(path)}"
+        )
+        self._load_worker = _LoadWorker(path)
+        self._load_worker.result_ready.connect(
+            lambda data: self._apply_report(path, data)
+        )
+        self._load_worker.error.connect(self._on_load_error)
+        self._load_worker.finished.connect(
+            lambda: self._open_btn.setEnabled(True)
+        )
+        self._load_worker.start()
+
+    def _on_load_error(self, msg: str) -> None:
+        self._status.showMessage(f"오류: {msg}")
+        self._open_btn.setEnabled(True)
+
+    def _apply_report(self, path: str, data) -> None:
         self._path_label.setText(os.path.basename(path))
         self._path_label.setToolTip(path)
         self._score_badge.setScore(data.malscore)
@@ -1519,6 +1571,23 @@ class _AnalysisWorker(QThread):
                 self.error.emit(str(e))
 
 
+class _LoadWorker(QThread):
+    """50MB+ 대용량 리포트 비동기 로딩 전용 스레드."""
+    result_ready = pyqtSignal(object)   # ReportData
+    error        = pyqtSignal(str)
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self._path = path
+
+    def run(self) -> None:
+        try:
+            data = ReportParser.load(self._path)
+            self.result_ready.emit(data)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class AnalysisDialog(QDialog):
     """Claude / Gemini API 분석 결과 다이얼로그."""
 
@@ -1610,6 +1679,22 @@ class AnalysisDialog(QDialog):
         # 하단 버튼
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+        copy_btn = QPushButton("클립보드 복사")
+        copy_btn.setStyleSheet(
+            f"border:1px solid {GRAY_200}; border-radius:50px;"
+            f" padding:4px 14px; background:{WHITE};"
+        )
+        copy_btn.clicked.connect(self._copy_result)
+        btn_row.addWidget(copy_btn)
+
+        save_btn = QPushButton("파일 저장")
+        save_btn.setStyleSheet(
+            f"border:1px solid {GRAY_200}; border-radius:50px;"
+            f" padding:4px 14px; background:{WHITE};"
+        )
+        save_btn.clicked.connect(self._save_result)
+        btn_row.addWidget(save_btn)
+
         retry_btn = QPushButton("다시 분석")
         retry_btn.setStyleSheet(
             f"border:1px solid {GRAY_200}; border-radius:50px;"
@@ -1732,6 +1817,32 @@ class AnalysisDialog(QDialog):
     def _on_error(self, msg: str) -> None:
         self._result_box.setPlainText(f"오류 발생:\n{msg}")
         self._status_lbl.setText("오류가 발생했습니다.")
+
+    def _copy_result(self) -> None:
+        text = self._result_box.toPlainText().strip()
+        if not text:
+            self._status_lbl.setText("복사할 내용이 없습니다.")
+            return
+        QGuiApplication.clipboard().setText(text)
+        self._status_lbl.setText("클립보드에 복사했습니다.")
+
+    def _save_result(self) -> None:
+        text = self._result_box.toPlainText().strip()
+        if not text:
+            self._status_lbl.setText("저장할 내용이 없습니다.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "분석 결과 저장", "ai_analysis.txt",
+            "텍스트 파일 (*.txt);;Markdown 파일 (*.md);;모든 파일 (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self._status_lbl.setText(f"저장 완료: {path}")
+        except OSError as e:
+            self._status_lbl.setText(f"저장 실패: {e}")
 
     def closeEvent(self, event) -> None:
         if self._worker and self._worker.isRunning():
