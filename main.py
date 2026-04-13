@@ -1310,8 +1310,13 @@ def _card_widget() -> QFrame:
 def _clear_layout(layout) -> None:
     while layout.count():
         item = layout.takeAt(0)
-        if item.widget():
-            item.widget().deleteLater()
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
+        else:
+            sub = item.layout()
+            if sub is not None:
+                _clear_layout(sub)
 
 
 def _card_with_vbox(margins=(16, 16, 16, 16), spacing: int = 10) -> tuple[QFrame, QVBoxLayout]:
@@ -1441,7 +1446,11 @@ class _AnalysisWorker(QThread):
         self._prompt   = prompt
         self._api_key  = api_key
         self._provider = provider  # "claude" | "gemini"
+        self._cancelled  = False
 
+
+    def cancel(self) -> None:
+        self._cancelled = True
     def run(self) -> None:
         try:
             if self._provider == "claude":
@@ -1452,18 +1461,22 @@ class _AnalysisWorker(QThread):
                     max_tokens=2000,
                     messages=[{"role": "user", "content": self._prompt}],
                 )
-                self.result_ready.emit(msg.content[0].text)
+                if not self._cancelled:
+                    self.result_ready.emit(msg.content[0].text)
             else:  # gemini
                 import google.generativeai as genai
                 genai.configure(api_key=self._api_key)
                 model = genai.GenerativeModel("gemini-2.5-flash")
                 response = model.generate_content(self._prompt)
-                self.result_ready.emit(response.text)
+                if not self._cancelled:
+                    self.result_ready.emit(response.text)
         except ImportError:
             pkg = "anthropic" if self._provider == "claude" else "google-generativeai"
-            self.error.emit(f"{pkg} 패키지가 없습니다.\n터미널에서: pip install {pkg}")
+            if not self._cancelled:
+                self.error.emit(f"{pkg} 패키지가 없습니다.\n터미널에서: pip install {pkg}")
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._cancelled:
+                self.error.emit(str(e))
 
 
 class AnalysisDialog(QDialog):
@@ -1682,8 +1695,11 @@ class AnalysisDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait()
+            self._worker.cancel()
+            self._worker.quit()
+            if not self._worker.wait(3000):  # 3초 내 자연 종료 대기
+                self._worker.terminate()     # 최후 수단
+                self._worker.wait()
         super().closeEvent(event)
 
 
