@@ -19,6 +19,7 @@ from __future__ import annotations
 import sys
 import os
 import re
+import webbrowser
 
 try:
     import keyring as _keyring
@@ -39,7 +40,7 @@ from PyQt6.QtGui import QColor, QGuiApplication
 from parser import ReportParser, ReportData, ReportInterpreter
 from widgets import (
     MalScoreBadge, EmptyState, HashCard, InfoTable, SeverityBadge,
-    BLACK, WHITE, GRAY_200, GRAY_500, GRAY_50,
+    BLACK, WHITE, GRAY_200, GRAY_500, GRAY_50, SEVERITY_COLORS,
 )
 
 
@@ -111,6 +112,8 @@ QLabel#pathLabel {{
 # --- 탭 클래스 6개 ------------------------------------------------------------
 
 class OverviewTab(QWidget):
+    _MAX_STRINGS = 200
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._layout = QVBoxLayout(self)
@@ -360,12 +363,11 @@ class OverviewTab(QWidget):
             vbox.addWidget(vt_card)
 
 
-        _MAX_STRINGS = 200
         if fi.strings:
             str_card, st_lay = _card_with_vbox(spacing=8)
-            clipped = len(fi.strings) > _MAX_STRINGS
+            clipped = len(fi.strings) > self._MAX_STRINGS
             title_text = (
-                f"Strings ({_MAX_STRINGS}/{len(fi.strings)}개 표시)"
+                f"Strings ({self._MAX_STRINGS}/{len(fi.strings)}개 표시)"
                 if clipped else f"Strings ({len(fi.strings)}개)"
             )
             st_title = QLabel(title_text)
@@ -373,8 +375,8 @@ class OverviewTab(QWidget):
             st_lay.addWidget(st_title)
 
             str_table = InfoTable(["String"])
-            _fixed_height_table(str_table, min(len(fi.strings), _MAX_STRINGS), cap=_MAX_STRINGS)
-            for s in fi.strings[:_MAX_STRINGS]:
+            _fixed_height_table(str_table, min(len(fi.strings), self._MAX_STRINGS), cap=self._MAX_STRINGS)
+            for s in fi.strings[:self._MAX_STRINGS]:
                 str_table.add_row([s])
             st_lay.addWidget(str_table)
             vbox.addWidget(str_card)
@@ -596,7 +598,6 @@ class SignaturesTab(QWidget):
 
     @staticmethod
     def _btn_style(key: str, checked: bool) -> str:
-        from widgets import SEVERITY_COLORS
         if checked:
             if key == "ALL":
                 bg, fg = BLACK, WHITE
@@ -678,7 +679,6 @@ class ATTACKTab(QWidget):
         self._layout.addWidget(table)
 
     def _open_mitre(self, table: InfoTable, row: int) -> None:
-        import webbrowser
         id_item = table.item(row, 0)
         sub_item = table.item(row, 1)
         if id_item is None or id_item.text() == "—":
@@ -1196,11 +1196,11 @@ class MainWindow(QMainWindow):
         bar.setIconSize(QSize(0, 0))
         self.addToolBar(bar)
 
-        open_btn = QPushButton("리포트 열기")
-        open_btn.setObjectName("openBtn")
-        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_btn.clicked.connect(self._open_file_dialog)
-        bar.addWidget(open_btn)
+        self._open_btn = QPushButton("리포트 열기")
+        self._open_btn.setObjectName("openBtn")
+        self._open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._open_btn.clicked.connect(self._open_file_dialog)
+        bar.addWidget(self._open_btn)
 
         self._path_label = QLabel("파일을 선택하세요")
         self._path_label.setObjectName("pathLabel")
@@ -1369,6 +1369,7 @@ def _clear_layout(layout) -> None:
             sub = item.layout()
             if sub is not None:
                 _clear_layout(sub)
+        del item
 
 
 def _card_with_vbox(margins=(16, 16, 16, 16), spacing: int = 10) -> tuple[QFrame, QVBoxLayout]:
@@ -1643,13 +1644,13 @@ class AnalysisDialog(QDialog):
             f"border:1px solid {GRAY_200}; border-radius:6px; padding:4px 8px;"
         )
         kf_lay.addWidget(self._key_input, 1)
-        save_btn = QPushButton("저장 후 분석")
-        save_btn.setStyleSheet(
+        key_save_btn = QPushButton("저장 후 분석")
+        key_save_btn.setStyleSheet(
             f"background:{BLACK}; color:{WHITE}; border-radius:50px;"
             f" padding:4px 14px; font-weight:600; border:none;"
         )
-        save_btn.clicked.connect(self._on_save_key)
-        kf_lay.addWidget(save_btn)
+        key_save_btn.clicked.connect(self._on_save_key)
+        kf_lay.addWidget(key_save_btn)
         lay.addWidget(self._key_frame)
 
         # 상태 레이블
