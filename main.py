@@ -1410,6 +1410,42 @@ def _build_prompt(data: ReportData) -> str:
     ))
     net_total  = sum(len(v) for v in data.suricata.values())
 
+    # 네트워크 IOC 추출
+    dns_domains = list(dict.fromkeys(
+        str(e.get("request", "")) for e in data.suricata["dns"] if e.get("request")
+    ))[:15]
+    http_urls = list(dict.fromkeys(
+        f"{e.get('dst', '')}:{e.get('dport', '')}{e.get('uri', '')}"
+        for e in data.suricata["http"] if e.get("dst")
+    ))[:10]
+    tls_snis = list(dict.fromkeys(
+        str(e.get("sni", "")) for e in data.suricata["tls"] if e.get("sni")
+    ))[:10]
+    alert_sigs = list(dict.fromkeys(
+        str(e.get("signature", "")) for e in data.suricata["alerts"] if e.get("signature")
+    ))[:10]
+
+    net_section_parts = []
+    if alert_sigs:
+        net_section_parts.append("Suricata 알림:
+" + "
+".join(f"- {s}" for s in alert_sigs))
+    if dns_domains:
+        net_section_parts.append("DNS 요청 도메인:
+" + "
+".join(f"- {d}" for d in dns_domains))
+    if http_urls:
+        net_section_parts.append("HTTP 접속:
+" + "
+".join(f"- {u}" for u in http_urls))
+    if tls_snis:
+        net_section_parts.append("TLS SNI:
+" + "
+".join(f"- {s}" for s in tls_snis))
+    net_section = "
+
+".join(net_section_parts) if net_section_parts else f"이벤트 {net_total}건 (세부 IOC 없음)"
+
     return f"""다음은 CAPEv2 악성코드 샌드박스 분석 결과입니다. 보안 전문가 관점에서 한국어로 분석해 주세요.
 
 ## 기본 정보
@@ -1425,6 +1461,9 @@ def _build_prompt(data: ReportData) -> str:
 ## MITRE ATT&CK TTP
 {', '.join(ttp_ids) if ttp_ids else '없음'}
 
+
+## 네트워크 활동
+{net_section}
 ## 프로세스 행동
 - 프로세스 수: {len(data.behavior_processes)}개
 - 총 API 호출: {sum(len(p.calls) for p in data.behavior_processes):,}건
@@ -1433,7 +1472,8 @@ def _build_prompt(data: ReportData) -> str:
 1. **악성코드 유형 및 목적** — 어떤 종류의 악성코드이며 무엇을 노리는지
 2. **주요 행동 패턴** — 핵심 시그니처와 TTP 기반 설명
 3. **공격 시나리오 흐름** — 실행 → 회피 → 목적 달성 순서로
-4. **방어/대응 권고** — 구체적인 조치 2~3가지"""
+4. **네트워크 IOC 평가** — C2 주소, 의심 도메인/URL 식별
+5. **방어/대응 권고** — 구체적인 조치 2~3가지"""
 
 
 class _AnalysisWorker(QThread):
@@ -1636,7 +1676,7 @@ class AnalysisDialog(QDialog):
         if not key:
             self._status_lbl.setText("API 키를 입력하세요.")
             return
-        if provider == "claude" and not key.startswith("sk-"):
+        if provider == "claude" and not key.startswith("sk-ant-"):
             self._status_lbl.setText("올바른 Anthropic API 키를 입력하세요 (sk-ant-... 형식).")
             return
         # 1순위: OS 키체인에 저장 — 평문 파일보다 안전
