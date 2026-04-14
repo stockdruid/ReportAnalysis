@@ -40,7 +40,7 @@ from PyQt6.QtGui import QColor, QGuiApplication
 from parser import ReportParser, ReportData, ReportInterpreter
 from widgets import (
     MalScoreBadge, EmptyState, HashCard, InfoTable, SeverityBadge,
-    BLACK, WHITE, GRAY_200, GRAY_500, GRAY_50, SEVERITY_COLORS,
+    BLACK, WHITE, GRAY_200, GRAY_500, GRAY_50, SEVERITY_COLORS, MINT,
 )
 
 
@@ -70,7 +70,7 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{
     color: {BLACK};
-    border-bottom: 2px solid {BLACK};
+    border-bottom: 2px solid {MINT};
     font-weight: 600;
 }}
 QTabBar::tab:hover:!selected {{
@@ -99,7 +99,7 @@ QPushButton#openBtn {{
     border: none;
 }}
 QPushButton#openBtn:hover {{
-    background: #333333;
+    background: #3A5248;
 }}
 QLabel#pathLabel {{
     color: {GRAY_500};
@@ -198,7 +198,7 @@ class OverviewTab(QWidget):
                 text = f"{tid}" + (f"  {desc}" if desc else "")
                 t_lbl = QLabel(text)
                 t_lbl.setStyleSheet(
-                    f"background:#eff6ff; color:#1d4ed8;"
+                    f"background:{MINT}; color:{BLACK};"
                     f" border-radius:50px; padding:2px 10px;"
                     f" font-size:11px; font-family:Consolas,monospace;"
                 )
@@ -356,7 +356,7 @@ class OverviewTab(QWidget):
             total_vt  = vt.get("total", 0)
             ratio_lbl = QLabel(f"{positives} / {total_vt} 엔진 탐지")
             ratio_lbl.setStyleSheet(
-                f"color:{'#b91c1c' if positives > 0 else '#15803d'};"
+                f"color:{'#8C2020' if positives > 0 else '#3D6B5A'};"
                 f" font-size:16px; font-weight:700;"
             )
             vt_lay.addWidget(ratio_lbl)
@@ -582,7 +582,7 @@ class SignaturesTab(QWidget):
             layout.addWidget(ref_lbl)
             for ref in sig.references:
                 r_lbl = QLabel(f"• {ref}")
-                r_lbl.setStyleSheet(f"color:#2563eb; font-size:12px;")
+                r_lbl.setStyleSheet(f"color:#3D6B5A; font-size:12px;")
                 r_lbl.setWordWrap(True)
                 layout.addWidget(r_lbl)
 
@@ -670,7 +670,7 @@ class ATTACKTab(QWidget):
             # TTP ID 셀 — 파란 링크 스타일
             id_item = table.item(row_idx, 0)
             if id_item and main_id != "—":
-                id_item.setForeground(QColor("#2563eb"))
+                id_item.setForeground(QColor("#3D6B5A"))
                 font = id_item.font()
                 font.setUnderline(True)
                 id_item.setFont(font)
@@ -721,7 +721,7 @@ class NetworkTab(QWidget):
                 font-size: 12px;
             }}
             QTabBar::tab:selected {{
-                color: {BLACK}; border-bottom: 2px solid {BLACK};
+                color: {BLACK}; border-bottom: 2px solid {MINT};
                 font-weight: 600;
             }}
             QTabBar::tab:hover:!selected {{ color: {BLACK}; }}
@@ -964,7 +964,7 @@ class BehaviorTab(QWidget):
                 for col in range(self._call_table.columnCount()):
                     item = self._call_table.item(row_idx, col)
                     if item:
-                        item.setBackground(QColor("#fee2e2"))
+                        item.setBackground(QColor("#F0D8D8"))
             self._call_table.setRowHeight(row_idx, 28)
 
         self._call_table.fit_columns()
@@ -1219,11 +1219,11 @@ class MainWindow(QMainWindow):
         self._ai_btn.clicked.connect(self._open_analysis_dialog)
         self._ai_btn.setStyleSheet(
             "QPushButton#aiBtn {"
-            "  background: #2563eb; color: #ffffff;"
+            "  background: #3D6B5A; color: #F6F4E8;"
             "  border-radius: 50px; padding: 6px 18px;"
             "  font-size: 13px; font-weight: 600; border: none;"
             "}"
-            "QPushButton#aiBtn:hover { background: #1d4ed8; }"
+            "QPushButton#aiBtn:hover { background: #2C5A4A; }"
         )
         self._ai_action = bar.addWidget(self._ai_btn)
         self._ai_action.setVisible(False)
@@ -1489,34 +1489,103 @@ def _build_prompt(data: ReportData) -> str:
         net_section_parts.append("TLS SNI:\n" + "\n".join(f"- {s}" for s in tls_snis))
     net_section = "\n\n".join(net_section_parts) if net_section_parts else f"이벤트 {net_total}건 (세부 IOC 없음)"
 
-    return f"""다음은 CAPEv2 악성코드 샌드박스 분석 결과입니다. 보안 전문가 관점에서 한국어로 분석해 주세요.
+    ioc_rows: list[str] = []
+    for d in dns_domains:
+        ioc_rows.append(f"| DNS | {d} | 의심 도메인 |")
+    for u in http_urls:
+        ioc_rows.append(f"| HTTP | {u} | 의심 HTTP |")
+    for s in tls_snis:
+        ioc_rows.append(f"| TLS SNI | {s} | 의심 TLS |")
+    for a in alert_sigs:
+        ioc_rows.append(f"| Suricata | {a} | 알림 시그니처 |")
+    ioc_table = "\n".join(ioc_rows) if ioc_rows else "_(IOC 없음)_"
 
-## 기본 정보
-- MalScore: {data.malscore}/10  |  상태: {data.malstatus}
-- 파일: {data.file_info.name}  |  크기: {data.file_info.size:,} bytes
-- 타입: {data.file_info.file_type[:80]}
-- CAPE 탐지: {', '.join(cape_types) if cape_types else '없음'}
-- Suricata 이벤트: {net_total}건
+    ttp_list = "\n".join(f"- {t}" for t in ttp_ids) if ttp_ids else "_(탐지 없음)_"
 
-## 탐지된 시그니처 ({len(data.signatures)}개)
+    return f"""다음은 CAPEv2 악성코드 샌드박스 분석 데이터입니다.
+아래 [분석 데이터]를 참고하여 [출력 템플릿]을 **정확히** 채워 출력하세요.
+
+규칙:
+- 템플릿 구조(섹션 제목, 표 헤더, 번호 순서)를 절대 변경하지 마세요.
+- [ ] 표시된 부분만 실제 내용으로 교체하세요.
+- 빈 항목은 "해당 없음"으로 채우세요.
+- 출력은 템플릿 내용만, 설명·서두·마무리 문장 없이 바로 시작하세요.
+- 모든 내용은 한국어로 작성하세요.
+
+---
+[분석 데이터]
+
+파일: {data.file_info.name}  |  크기: {data.file_info.size:,} bytes
+타입: {data.file_info.file_type[:80]}
+MalScore: {data.malscore}/10  |  상태: {data.malstatus}
+CAPE 탐지: {', '.join(cape_types) if cape_types else '없음'}
+프로세스: {len(data.behavior_processes)}개  |  API 호출: {sum(len(p.calls) for p in data.behavior_processes):,}건
+Suricata 이벤트: {net_total}건
+
+탐지 시그니처 ({len(data.signatures)}개):
 {chr(10).join(sig_lines) if sig_lines else '없음'}
 
-## MITRE ATT&CK TTP
-{', '.join(ttp_ids) if ttp_ids else '없음'}
+MITRE ATT&CK TTP:
+{ttp_list}
 
+네트워크 IOC:
+{ioc_table}
 
-## 네트워크 활동
-{net_section}
-## 프로세스 행동
-- 프로세스 수: {len(data.behavior_processes)}개
-- 총 API 호출: {sum(len(p.calls) for p in data.behavior_processes):,}건
+---
+[출력 템플릿]
 
-다음 항목을 포함해 분석해 주세요:
-1. **악성코드 유형 및 목적** — 어떤 종류의 악성코드이며 무엇을 노리는지
-2. **주요 행동 패턴** — 핵심 시그니처와 TTP 기반 설명
-3. **공격 시나리오 흐름** — 실행 → 회피 → 목적 달성 순서로
-4. **네트워크 IOC 평가** — C2 주소, 의심 도메인/URL 식별
-5. **방어/대응 권고** — 구체적인 조치 2~3가지"""
+## 판정
+
+| 항목 | 내용 |
+|------|------|
+| 위험도 | [낮음 / 보통 / 높음 / 위험] |
+| 악성코드 유형 | [Trojan / Ransomware / Stealer / Backdoor / Downloader / Worm / 기타] |
+| 주요 패밀리 | [알려진 패밀리명, 없으면 "알 수 없음"] |
+| 한줄 요약 | [핵심을 담은 한 문장] |
+
+---
+
+## 주요 행동 패턴
+
+- **[행동명]**: [시그니처·TTP 근거 포함 설명]
+- **[행동명]**: [설명]
+- **[행동명]**: [설명]
+
+(3~6개, 탐지된 시그니처 기반)
+
+---
+
+## ATT&CK 기법 분석
+
+| TTP ID | 기법명 | 관찰된 행동 |
+|--------|--------|-----------|
+| [T번호] | [기법명] | [구체적 근거] |
+
+---
+
+## 네트워크 IOC 평가
+
+| 유형 | 값 | 위협 평가 |
+|------|----|---------|
+| [DNS/HTTP/TLS/Suricata] | [값] | [C2 서버 / 의심 / 정상 / 알 수 없음] |
+
+(IOC 없으면 이 섹션은 "네트워크 활동 없음"으로만 표기)
+
+---
+
+## 공격 흐름
+
+1. **실행**: [최초 실행 방식 및 초기 행동]
+2. **회피 / 지속성**: [탐지 우회·지속성 유지 방법]
+3. **목적 달성**: [최종 목표 및 피해 내용]
+
+---
+
+## 대응 권고
+
+1. [즉시 조치: 구체적인 차단·격리 방법]
+2. [단기 조치: 탐지 규칙·패치 등]
+3. [장기 조치: 정책·아키텍처 개선]"""
 
 
 class _AnalysisWorker(QThread):

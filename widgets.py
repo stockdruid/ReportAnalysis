@@ -8,21 +8,27 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QColor, QClipboard, QGuiApplication
 
 
-# Design tokens
+# Design tokens — Soft palette (#F6F4E8 · #E5EEE4 · #C0E1D2 · #DC9B9B)
 
-BLACK   = "#000000"
-WHITE   = "#ffffff"
-GRAY_50 = "#f9f9f9"   # 테이블 줄무늬 홀수행
-GRAY_200 = "#e5e5e5"  # 구분선·테두리
-GRAY_500 = "#737373"  # 보조 텍스트
+CREAM    = "#F6F4E8"   # 메인 배경 (따뜻한 크림)
+SAGE     = "#E5EEE4"   # 보조 배경 · 교번행 · 패널
+MINT     = "#C0E1D2"   # 액센트 · 선택 상태 · 탭 인디케이터
+ROSE     = "#DC9B9B"   # 위험 · 높은 심각도
+
+# 하위 호환 별칭 (main.py import 유지)
+BLACK    = "#2C3830"   # 기본 텍스트 (소프트 다크 그린-블랙)
+WHITE    = CREAM       # 메인 배경
+GRAY_50  = SAGE        # 교번행 배경
+GRAY_200 = "#D4E0D2"   # 테두리
+GRAY_500 = "#6B8A7A"   # 보조 텍스트 (그린-그레이)
 
 # 심각도 색
 SEVERITY_COLORS = {
-    1: ("#dbeafe", "#1d4ed8"),   # Info   — 연파랑 bg, 진파랑 text
-    2: ("#fef9c3", "#854d0e"),   # Low    — 연노랑 bg, 갈색 text
-    3: ("#ffedd5", "#9a3412"),   # Medium — 연주황 bg, 진주황 text
-    4: ("#fee2e2", "#b91c1c"),   # High   — 연빨강 bg, 빨강 text
-    5: ("#7f1d1d", "#ffffff"),   # Critical — 진빨강 bg, 흰 text
+    1: (SAGE,      "#3D6B5A"),   # Info     — sage bg, 다크 틸 text
+    2: ("#F0ECD8", "#7A5C3A"),   # Low      — 따뜻한 크림 bg, 브라운 text
+    3: ("#F5E4D5", "#8C4A30"),   # Medium   — 소프트 오렌지 bg
+    4: ("#F0D8D8", "#8C2020"),   # High     — 로즈-크림 bg
+    5: (ROSE,      "#2C1A1A"),   # Critical — ROSE bg, 다크 text
 }
 SEVERITY_LABELS = {1: "Info", 2: "Low", 3: "Medium", 4: "High", 5: "Critical"}
 
@@ -30,10 +36,10 @@ SEVERITY_LABELS = {1: "Info", 2: "Low", 3: "Medium", 4: "High", 5: "Critical"}
 def malscore_color(score: int) -> tuple[str, str]:
     """(bg, text) 반환"""
     if score <= 3:
-        return ("#dcfce7", "#15803d")   # 녹색
+        return (SAGE, "#3D6B5A")        # 세이지-틸
     if score <= 6:
-        return ("#ffedd5", "#9a3412")   # 주황
-    return ("#fee2e2", "#b91c1c")       # 빨강
+        return ("#F5E4D5", "#8C4A30")   # 소프트 오렌지
+    return ("#F0D8D8", "#8C2020")       # 로즈-레드
 
 
 # 공통 스타일 헬퍼
@@ -142,7 +148,7 @@ class HashCard(QGroupBox):
                 f"  font-family:Consolas,monospace; font-size:12px;"
                 f"  text-align:left; padding:0;"
                 f"}}"
-                f"QPushButton:hover {{ color:#2563eb; }}"
+                f"QPushButton:hover {{ color:#3D6B5A; }}"
             )
             if value:
                 val_btn.clicked.connect(lambda _, v=value: self._copy(v))
@@ -196,7 +202,7 @@ class InfoTable(QTableWidget):
                 border: none;
             }}
             QTableWidget::item:selected {{
-                background: #f0f0f0;
+                background: {MINT};
                 color: {BLACK};
             }}
             QHeaderView::section {{
