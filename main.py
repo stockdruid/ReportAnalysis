@@ -19,7 +19,15 @@ from __future__ import annotations
 import sys
 import os
 import re
+import time
+import tempfile
 import webbrowser
+
+try:
+    import requests as _requests
+    _REQUESTS_OK = True
+except ImportError:
+    _REQUESTS_OK = False
 
 try:
     import keyring as _keyring
@@ -100,6 +108,19 @@ QPushButton#openBtn {{
 }}
 QPushButton#openBtn:hover {{
     background: #3A5248;
+}}
+QPushButton#submitBtn {{
+    background: {WHITE};
+    color: {BLACK};
+    border: 1px solid {GRAY_200};
+    border-radius: 50px;
+    padding: 6px 18px;
+    font-size: 13px;
+    font-weight: 600;
+}}
+QPushButton#submitBtn:hover {{
+    background: {GRAY_50};
+    border-color: {GRAY_500};
 }}
 QLabel#pathLabel {{
     color: {GRAY_500};
@@ -871,15 +892,54 @@ class BehaviorTab(QWidget):
             return
 
         total_calls = sum(len(p.calls) for p in self._procs)
+        file_calls   = self._collect_by_category(self._procs, {"file"})
+        reg_calls    = self._collect_by_category(self._procs, {"registry"})
+        proc_calls   = self._collect_by_category(self._procs, {"process"})
 
         self._layout.addWidget(_header_bar(
             f"프로세스 {len(self._procs)}개  |  API 호출 {total_calls:,}개"
+            f"  |  파일 {len(file_calls)}건  |  레지스트리 {len(reg_calls)}건"
+            f"  |  프로세스 생성 {len(proc_calls)}건"
         ))
 
-        # ── 좌(프로세스 목록) + 우(API 호출 테이블) 스플리터 ────────────
+        # ── 서브탭 ────────────────────────────────────────────────────────
+        sub = QTabWidget()
+        sub.setDocumentMode(True)
+
+        # Tab 1: API 호출 (프로세스별)
+        sub.addTab(self._make_api_tab(), f"API 호출 ({total_calls:,})")
+
+        # Tab 2: 파일 조작
+        sub.addTab(
+            self._make_flat_tab(file_calls, empty_msg="파일 관련 API 호출 없음"),
+            f"파일 조작 ({len(file_calls)})",
+        )
+
+        # Tab 3: 레지스트리 변경
+        sub.addTab(
+            self._make_flat_tab(reg_calls, empty_msg="레지스트리 관련 API 호출 없음"),
+            f"레지스트리 ({len(reg_calls)})",
+        )
+
+        # Tab 4: 프로세스 생성
+        sub.addTab(
+            self._make_flat_tab(proc_calls, empty_msg="프로세스 생성 API 호출 없음"),
+            f"프로세스 생성 ({len(proc_calls)})",
+        )
+
+        self._layout.addWidget(sub)
+
+        # 첫 번째 프로세스 자동 선택
+        if self._procs:
+            self._proc_table.selectRow(0)
+
+    # ── 탭 빌더 ──────────────────────────────────────────────────────────
+
+    def _make_api_tab(self) -> QWidget:
+        """기존 프로세스 목록 + API 호출 스플리터 뷰."""
         splitter = _make_splitter()
 
-        # 좌: 프로세스 목록 테이블
+        # 좌: 프로세스 목록
         self._proc_table = InfoTable(["PID", "프로세스명", "부모 PID", "API 호출"])
         self._proc_table.setMaximumWidth(380)
         self._proc_table.horizontalHeader().setSectionResizeMode(
@@ -897,7 +957,7 @@ class BehaviorTab(QWidget):
         self._proc_table.itemSelectionChanged.connect(self._on_proc_select)
         splitter.addWidget(self._proc_table)
 
-        # 우: API 호출 테이블 + 정보
+        # 우: API 호출 테이블
         right = QWidget()
         right.setStyleSheet(f"background:{WHITE};")
         right_lay = QVBoxLayout(right)
@@ -920,13 +980,71 @@ class BehaviorTab(QWidget):
         )
         right_lay.addWidget(self._call_table)
         splitter.addWidget(right)
-
         splitter.setSizes([380, 900])
-        self._layout.addWidget(splitter)
+        return splitter
 
-        # 첫 번째 프로세스 자동 선택
-        if self._procs:
-            self._proc_table.selectRow(0)
+    @staticmethod
+    def _collect_by_category(
+        procs: list, categories: set[str]
+    ) -> list[tuple]:
+        """모든 프로세스에서 해당 카테고리 API 호출 수집.
+        반환: [(proc_name, pid, call), ...]"""
+        result = []
+        for proc in procs:
+            for call in proc.calls:
+                if call.category.lower() in categories:
+                    result.append((proc.process_name, proc.process_id, call))
+        return result
+
+    @staticmethod
+    def _make_flat_tab(
+        rows: list[tuple], empty_msg: str = "해당 없음"
+    ) -> QWidget:
+        """(proc_name, pid, ProcessCall) 목록 → 플랫 테이블 위젯."""
+        if not rows:
+            return EmptyState(empty_msg)
+
+        table = InfoTable(["PID", "프로세스", "Timestamp", "API", "Status", "인자"])
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+
+        cap = BehaviorTab._MAX_CALLS
+        for proc_name, pid, c in rows[:cap]:
+            args_str = "  ".join(
+                f"{a['name']}={a['value']}" for a in c.arguments if isinstance(a, dict)
+            ) if c.arguments else ""
+            rep = f" ×{c.repeated}" if c.repeated else ""
+            row_idx = table.add_row([
+                str(pid),
+                proc_name,
+                c.timestamp.split(",")[0],
+                c.api + rep,
+                "OK" if c.status else "FAIL",
+                args_str,
+            ])
+            if not c.status:
+                for col in range(table.columnCount()):
+                    item = table.item(row_idx, col)
+                    if item:
+                        item.setBackground(QColor("#F0D8D8"))
+            table.setRowHeight(row_idx, 28)
+
+        if len(rows) > cap:
+            # 잘린 경우 안내 행
+            note_idx = table.add_row([
+                "", f"... 상위 {cap:,}건만 표시 (전체 {len(rows):,}건)", "", "", "", ""
+            ])
+            table.setRowHeight(note_idx, 28)
+
+        table.fit_columns()
+
+        wrapper = QWidget()
+        lay = QVBoxLayout(wrapper)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(table)
+        return wrapper
 
     # ── 프로세스 선택 → API 호출 테이블 갱신 ─────────────────────────────
 
@@ -1202,6 +1320,12 @@ class MainWindow(QMainWindow):
         self._open_btn.clicked.connect(self._open_file_dialog)
         bar.addWidget(self._open_btn)
 
+        self._submit_btn = QPushButton("샌드박스 제출")
+        self._submit_btn.setObjectName("submitBtn")
+        self._submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._submit_btn.clicked.connect(self._open_submit_dialog)
+        bar.addWidget(self._submit_btn)
+
         self._path_label = QLabel("파일을 선택하세요")
         self._path_label.setObjectName("pathLabel")
         self._path_label.setSizePolicy(
@@ -1254,6 +1378,10 @@ class MainWindow(QMainWindow):
         self._status.showMessage("준비")
 
     # -- 파일 열기 --------------------------------------------------------------
+
+    def _open_submit_dialog(self) -> None:
+        dlg = SubmitDialog(parent=self)
+        dlg.exec()
 
     def _open_analysis_dialog(self) -> None:
         data = getattr(self, "_current_data", None)
@@ -1588,6 +1716,130 @@ MITRE ATT&CK TTP:
 3. [장기 조치: 정책·아키텍처 개선]"""
 
 
+class _SubmitWorker(QThread):
+    """CAPEv2 샌드박스 제출 → 폴링 → 리포트 다운로드 백그라운드 스레드."""
+    status_update = pyqtSignal(str)   # 진행 상황 메시지
+    report_ready  = pyqtSignal(str)   # 완료 시 임시 JSON 파일 경로
+    error         = pyqtSignal(str)
+
+    _POLL_INTERVAL = 15  # 초
+    _MAX_WAIT_SEC  = 30 * 60  # 30분
+
+    def __init__(self, server_url: str, token: str, file_path: str, password: str = "") -> None:
+        super().__init__()
+        self._url       = server_url.rstrip("/")
+        self._token     = token.strip()
+        self._file_path = file_path
+        self._password  = password.strip()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        if not _REQUESTS_OK:
+            self.error.emit("requests 패키지가 없습니다. pip install requests 후 재시도하세요.")
+            return
+        try:
+            headers: dict[str, str] = {}
+            if self._token:
+                headers["Authorization"] = f"Token {self._token}"
+
+            # ── 1. 파일 제출 ──────────────────────────────────────────────
+            self.status_update.emit("샘플 제출 중...")
+            with open(self._file_path, "rb") as fh:
+                data = {}
+                if self._password:
+                    data["password"] = self._password
+                resp = _requests.post(
+                    f"{self._url}/apiv2/tasks/create/file/",
+                    files={"file": (os.path.basename(self._file_path), fh)},
+                    data=data,
+                    headers=headers,
+                    timeout=30,
+                )
+            resp.raise_for_status()
+            body = resp.json()
+            self.status_update.emit(f"서버 응답: {body}")
+
+            # 응답 형식: {"task_id": 1} 또는 {"task_ids": [1]} 또는 {"data": {"task_id": 1}}
+            task_id = None
+            if "task_id" in body:
+                task_id = body["task_id"]
+            elif "task_ids" in body:
+                ids = body["task_ids"]
+                task_id = ids[0] if isinstance(ids, list) and ids else ids
+            elif "data" in body and isinstance(body["data"], dict):
+                task_id = body["data"].get("task_id") or body["data"].get("task_ids")
+                if isinstance(task_id, list):
+                    task_id = task_id[0] if task_id else None
+
+            if not task_id:
+                self.error.emit(f"task_id를 찾을 수 없음. 서버 응답: {body}")
+                return
+            self.status_update.emit(f"제출 완료 — Task ID: {task_id} | 분석 대기 중...")
+
+            # ── 2. 상태 폴링 (최대 30분) ──────────────────────────────────
+            start_ts = time.time()
+            while not self._cancelled:
+                if time.time() - start_ts > self._MAX_WAIT_SEC:
+                    self.error.emit(
+                        f"타임아웃: 30분 동안 분석이 완료되지 않았습니다 (Task {task_id}).\n"
+                        f"서버측 워커/VM 상태를 확인하세요."
+                    )
+                    return
+                time.sleep(self._POLL_INTERVAL)
+                if self._cancelled:
+                    break
+                resp = _requests.get(
+                    f"{self._url}/apiv2/tasks/view/{task_id}/",
+                    headers=headers,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                # 응답 형식: {"task": {"status": ...}} 또는 {"data": {"status": ...}} 등
+                if "task" in body and isinstance(body["task"], dict):
+                    status = body["task"].get("status", "unknown")
+                elif "data" in body and isinstance(body["data"], dict):
+                    status = body["data"].get("status", "unknown")
+                elif "status" in body:
+                    status = body["status"]
+                else:
+                    status = "unknown"
+                    self.status_update.emit(f"Task {task_id} 응답 구조 확인: {body}")
+                self.status_update.emit(f"Task {task_id} 상태: {status} | 대기 중...")
+                if status in ("reported", "completed"):
+                    break
+                if status in ("failed", "aborted"):
+                    self.error.emit(f"샌드박스 분석 실패: status={status}")
+                    return
+
+            if self._cancelled:
+                return
+
+            # ── 3. 리포트 다운로드 ────────────────────────────────────────
+            self.status_update.emit(f"리포트 다운로드 중... (Task {task_id})")
+            resp = _requests.get(
+                f"{self._url}/apiv2/tasks/get/report/{task_id}/json/",
+                headers=headers,
+                timeout=120,
+            )
+            resp.raise_for_status()
+
+            with tempfile.NamedTemporaryFile(
+                mode="wb", suffix=".json", delete=False,
+                prefix=f"cape_task{task_id}_",
+            ) as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            self.report_ready.emit(tmp_path)
+
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class _AnalysisWorker(QThread):
     """AnalysisDialog 전용 백그라운드 스레드 — 외부 노출 안 함."""
     result_ready = pyqtSignal(str)
@@ -1911,6 +2163,188 @@ class AnalysisDialog(QDialog):
             if not self._worker.wait(3000):  # 3초 내 자연 종료 대기
                 self._worker.terminate()     # 최후 수단
                 self._worker.wait()
+        super().closeEvent(event)
+
+
+class SubmitDialog(QDialog):
+    """CAPEv2 샌드박스 샘플 제출 다이얼로그."""
+
+    _CONFIG_PATH = os.path.expanduser("~/.cape_submit_config")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("샌드박스 제출")
+        self.setMinimumWidth(520)
+        self.setModal(True)
+
+        self._worker: _SubmitWorker | None = None
+        self._server_url = ""
+        self._token = ""
+        self._file_path = ""
+
+        self._build_ui()
+        self._load_config()
+
+    # ── UI 빌드 ──────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setSpacing(14)
+        root.setContentsMargins(24, 20, 24, 20)
+
+        # 서버 URL
+        root.addWidget(self._section_label("CAPEv2 서버 URL"))
+        self._url_edit = QLineEdit()
+        self._url_edit.setPlaceholderText("http://192.168.x.x 또는 http://cape.local")
+        root.addWidget(self._url_edit)
+
+        # API 토큰 (선택)
+        root.addWidget(self._section_label("API 토큰 (선택)"))
+        self._token_edit = QLineEdit()
+        self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._token_edit.setPlaceholderText("인증이 필요한 경우에만 입력")
+        root.addWidget(self._token_edit)
+
+        # 암호 (선택)
+        root.addWidget(self._section_label("ZIP 암호 (선택)"))
+        self._pw_edit = QLineEdit()
+        self._pw_edit.setPlaceholderText("예: infected  (암호 없으면 비워두세요)")
+        root.addWidget(self._pw_edit)
+
+        # 파일 선택
+        root.addWidget(self._section_label("분석 샘플"))
+        file_row = QHBoxLayout()
+        self._file_label = QLabel("파일을 선택하세요")
+        self._file_label.setStyleSheet(f"color:{GRAY_500}; font-size:12px; font-family:Consolas,monospace;")
+        self._file_label.setWordWrap(True)
+        file_row.addWidget(self._file_label, 1)
+        browse_btn = QPushButton("파일 선택")
+        browse_btn.setFixedWidth(90)
+        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse_btn.clicked.connect(self._browse_file)
+        file_row.addWidget(browse_btn)
+        root.addLayout(file_row)
+
+        # 상태 레이블
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(f"color:{GRAY_500}; font-size:12px;")
+        self._status_lbl.setWordWrap(True)
+        root.addWidget(self._status_lbl)
+
+        # 버튼 행
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._cancel_btn = QPushButton("취소")
+        self._cancel_btn.setFixedWidth(80)
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self._cancel_btn)
+
+        self._submit_btn = QPushButton("제출")
+        self._submit_btn.setFixedWidth(80)
+        self._submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._submit_btn.setStyleSheet(
+            f"QPushButton {{ background:{BLACK}; color:{WHITE};"
+            f" border-radius:6px; padding:6px 12px; font-weight:600; border:none; }}"
+            f"QPushButton:hover {{ background:#3A5248; }}"
+            f"QPushButton:disabled {{ background:{GRAY_200}; color:{GRAY_500}; }}"
+        )
+        self._submit_btn.clicked.connect(self._on_submit)
+        btn_row.addWidget(self._submit_btn)
+        root.addLayout(btn_row)
+
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{GRAY_500}; font-size:11px; font-weight:600; letter-spacing:1px;")
+        return lbl
+
+    # ── 설정 저장/로드 ───────────────────────────────────────────────────
+
+    def _load_config(self) -> None:
+        if not os.path.exists(self._CONFIG_PATH):
+            return
+        try:
+            with open(self._CONFIG_PATH, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            cfg: dict[str, str] = {}
+            for line in lines:
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    cfg[k.strip()] = v.strip()
+            self._url_edit.setText(cfg.get("url", ""))
+            self._token_edit.setText(cfg.get("token", ""))
+        except OSError:
+            pass
+
+    def _save_config(self) -> None:
+        try:
+            with open(self._CONFIG_PATH, "w", encoding="utf-8") as f:
+                f.write(f"url={self._url_edit.text().strip()}\n")
+                f.write(f"token={self._token_edit.text().strip()}\n")
+        except OSError:
+            pass
+
+    # ── 이벤트 핸들러 ────────────────────────────────────────────────────
+
+    def _browse_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "분석 샘플 선택", os.path.expanduser("~"),
+            "실행 파일 (*.exe *.dll *.bat *.ps1 *.vbs *.js *.doc *.docx *.pdf *.zip);;모든 파일 (*)",
+        )
+        if path:
+            self._file_path = path
+            self._file_label.setText(os.path.basename(path))
+            self._file_label.setStyleSheet(f"color:{BLACK}; font-size:12px; font-family:Consolas,monospace;")
+
+    def _on_submit(self) -> None:
+        url = self._url_edit.text().strip()
+        if not url:
+            self._status_lbl.setText("서버 URL을 입력하세요.")
+            return
+        if not self._file_path:
+            self._status_lbl.setText("분석할 파일을 선택하세요.")
+            return
+        if not _REQUESTS_OK:
+            self._status_lbl.setText("requests 패키지 없음 — pip install requests")
+            return
+
+        self._save_config()
+        self._submit_btn.setEnabled(False)
+        self._url_edit.setEnabled(False)
+        self._token_edit.setEnabled(False)
+
+        self._worker = _SubmitWorker(url, self._token_edit.text(), self._file_path, self._pw_edit.text())
+        self._worker.status_update.connect(self._status_lbl.setText)
+        self._worker.report_ready.connect(self._on_report_ready)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _on_cancel(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.quit()
+            self._worker.wait(3000)
+        self.reject()
+
+    def _on_report_ready(self, tmp_path: str) -> None:
+        self._status_lbl.setText(f"리포트 수신 완료 — 로드 중...")
+        main_win = self.parent()
+        if main_win and hasattr(main_win, "load_report"):
+            main_win.load_report(tmp_path)
+        self.accept()
+
+    def _on_error(self, msg: str) -> None:
+        self._status_lbl.setText(f"오류: {msg}")
+        self._submit_btn.setEnabled(True)
+        self._url_edit.setEnabled(True)
+        self._token_edit.setEnabled(True)
+
+    def closeEvent(self, event) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.quit()
+            self._worker.wait(3000)
         super().closeEvent(event)
 
 
