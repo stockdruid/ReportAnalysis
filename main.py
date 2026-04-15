@@ -29,12 +29,6 @@ try:
 except ImportError:
     _REQUESTS_OK = False
 
-try:
-    import keyring as _keyring
-    _KEYRING_OK = True
-except ImportError:
-    _KEYRING_OK = False
-
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
     QVBoxLayout, QHBoxLayout, QToolBar, QPushButton,
@@ -50,6 +44,42 @@ from widgets import (
     MalScoreBadge, EmptyState, HashCard, InfoTable, SeverityBadge,
     BLACK, WHITE, GRAY_200, GRAY_500, GRAY_50, SEVERITY_COLORS, MINT,
 )
+
+
+# ========================================================================
+# CONSTANTS
+# ========================================================================
+
+# ── CAPEv2 API ──
+_API_PREFIX            = "/apiv2"
+_ENDPOINT_SUBMIT       = f"{_API_PREFIX}/tasks/create/file/"
+_ENDPOINT_TASK_VIEW    = f"{_API_PREFIX}/tasks/view/{{task_id}}/"
+_ENDPOINT_REPORT_JSON  = f"{_API_PREFIX}/tasks/get/report/{{task_id}}/json/"
+
+# ── 네트워크 타임아웃 (초) ──
+_SUBMIT_TIMEOUT_S   = 30
+_POLL_TIMEOUT_S     = 15
+_REPORT_TIMEOUT_S   = 120
+
+# ── 샌드박스 상태 ──
+_STATUS_TERMINAL_OK    = frozenset({"reported", "completed"})
+_STATUS_TERMINAL_FAIL  = frozenset({"failed", "aborted"})
+
+# ── 표시 한도 ──
+_MAX_STRINGS_DISPLAY   = 200
+_MAX_API_CALLS_DISPLAY = 1000
+_LARGE_REPORT_BYTES    = 50 * 1024 * 1024  # 50MB
+
+# ── 워커 lifecycle ──
+_WORKER_SHUTDOWN_MS = 3000
+
+# ── LLM ──
+_LLM_MAX_TOKENS = 2000
+
+# ── 윈도우/다이얼로그 크기 ──
+_WINDOW_SIZE_MAIN     = (1280, 800)
+_WINDOW_SIZE_ANALYSIS = (780, 620)
+_WINDOW_SIZE_SUBMIT   = (780, 620)
 
 
 # --- 전역 스타일 --------------------------------------------------------------
@@ -131,9 +161,12 @@ QLabel#pathLabel {{
 
 
 # --- 탭 클래스 6개 ------------------------------------------------------------
+# ========================================================================
+# TAB CLASSES
+# ========================================================================
 
 class OverviewTab(QWidget):
-    _MAX_STRINGS = 200
+    _MAX_STRINGS = _MAX_STRINGS_DISPLAY
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -159,7 +192,21 @@ class OverviewTab(QWidget):
         vbox.setContentsMargins(24, 24, 24, 24)
         vbox.setSpacing(16)
 
-        fi = data.file_info
+        self._build_threat_section(vbox, data)
+        self._build_summary_section(vbox, data)
+        self._build_hash_section(vbox, data)
+        self._build_pe_section(vbox, data)
+        self._build_yara_section(vbox, data)
+        self._build_virustotal_section(vbox, data)
+        self._build_strings_section(vbox, data)
+
+        vbox.addStretch()
+        scroll.setWidget(content)
+        self._layout.addWidget(scroll)
+
+    # ── populate helpers (원래 populate 안에 있던 섹션별 로직) ────────────
+
+    def _build_threat_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
         summary = ReportInterpreter.summarize(data)
 
         # ── 0. 위협 요약 카드 ──────────────────────────────────────────────
@@ -237,6 +284,9 @@ class OverviewTab(QWidget):
 
         vbox.addWidget(threat_card)
 
+    def _build_summary_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
+        fi = data.file_info
+
         # ── 1. 파일 요약 카드 ──────────────────────────────────────────────
         summary_card, s_lay = _card_with_vbox()
         title = QLabel(fi.name if fi.name else "Unknown")
@@ -261,6 +311,9 @@ class OverviewTab(QWidget):
         ))
         vbox.addWidget(summary_card)
 
+    def _build_hash_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
+        fi = data.file_info
+
         # ── 2. 해시 카드 ───────────────────────────────────────────────────
         hash_items = [
             ("MD5",     fi.md5),
@@ -273,6 +326,9 @@ class OverviewTab(QWidget):
             ("ImpHash", fi.imphash),
         ]
         vbox.addWidget(HashCard("파일 해시", hash_items))
+
+    def _build_pe_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
+        fi = data.file_info
 
         # ── 3. PE 정보 ─────────────────────────────────────────────────────
         pe_card, pe_lay = _card_with_vbox(spacing=12)
@@ -348,6 +404,9 @@ class OverviewTab(QWidget):
 
         vbox.addWidget(pe_card)
 
+    def _build_yara_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
+        fi = data.file_info
+
         # ── 4. YARA 매치 ───────────────────────────────────────────────────
         all_yara = fi.yara + fi.cape_yara
         if all_yara:
@@ -366,6 +425,9 @@ class OverviewTab(QWidget):
             y_lay.addWidget(yara_table)
             vbox.addWidget(yara_card)
 
+    def _build_virustotal_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
+        fi = data.file_info
+
         # ── 5. VirusTotal ──────────────────────────────────────────────────
         vt = fi.virustotal
         if vt and isinstance(vt, dict) and not vt.get("error"):
@@ -383,6 +445,8 @@ class OverviewTab(QWidget):
             vt_lay.addWidget(ratio_lbl)
             vbox.addWidget(vt_card)
 
+    def _build_strings_section(self, vbox: QVBoxLayout, data: ReportData) -> None:
+        fi = data.file_info
 
         if fi.strings:
             str_card, st_lay = _card_with_vbox(spacing=8)
@@ -401,10 +465,6 @@ class OverviewTab(QWidget):
                 str_table.add_row([s])
             st_lay.addWidget(str_table)
             vbox.addWidget(str_card)
-
-        vbox.addStretch()
-        scroll.setWidget(content)
-        self._layout.addWidget(scroll)
 
 
 class SignaturesTab(QWidget):
@@ -873,7 +933,7 @@ class NetworkTab(QWidget):
 
 
 class BehaviorTab(QWidget):
-    _MAX_CALLS = 1000   # 테이블 최대 표시 행 (성능)
+    _MAX_CALLS = _MAX_API_CALLS_DISPLAY   # 테이블 최대 표시 행 (성능)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1276,7 +1336,7 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_path: str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("CAPEv2 Report Analyzer")
-        self.resize(1280, 800)
+        self.resize(*_WINDOW_SIZE_MAIN)
         self.setMinimumSize(900, 600)
         self.setAcceptDrops(True)
 
@@ -1400,7 +1460,7 @@ class MainWindow(QMainWindow):
         if path:
             self.load_report(path)
 
-    _ASYNC_THRESHOLD = 50 * 1024 * 1024
+    _ASYNC_THRESHOLD = _LARGE_REPORT_BYTES
 
     def load_report(self, path: str) -> None:
         self._status.showMessage(f"로딩 중: {path}")
@@ -1463,6 +1523,9 @@ class MainWindow(QMainWindow):
 
 
 # --- 유틸 --------------------------------------------------------------------
+# ========================================================================
+# MODULE-LEVEL HELPERS
+# ========================================================================
 
 # 공통 스타일 상수 (f-string 중복 제거)
 _MONO_KEY_STYLE = (
@@ -1716,6 +1779,10 @@ MITRE ATT&CK TTP:
 3. [장기 조치: 정책·아키텍처 개선]"""
 
 
+# ========================================================================
+# BACKGROUND WORKERS
+# ========================================================================
+
 class _SubmitWorker(QThread):
     """CAPEv2 샌드박스 제출 → 폴링 → 리포트 다운로드 백그라운드 스레드."""
     status_update = pyqtSignal(str)   # 진행 상황 메시지
@@ -1752,11 +1819,11 @@ class _SubmitWorker(QThread):
                 if self._password:
                     data["password"] = self._password
                 resp = _requests.post(
-                    f"{self._url}/apiv2/tasks/create/file/",
+                    f"{self._url}{_ENDPOINT_SUBMIT}",
                     files={"file": (os.path.basename(self._file_path), fh)},
                     data=data,
                     headers=headers,
-                    timeout=30,
+                    timeout=_SUBMIT_TIMEOUT_S,
                 )
             resp.raise_for_status()
             body = resp.json()
@@ -1792,9 +1859,9 @@ class _SubmitWorker(QThread):
                 if self._cancelled:
                     break
                 resp = _requests.get(
-                    f"{self._url}/apiv2/tasks/view/{task_id}/",
+                    f"{self._url}{_ENDPOINT_TASK_VIEW.format(task_id=task_id)}",
                     headers=headers,
-                    timeout=15,
+                    timeout=_POLL_TIMEOUT_S,
                 )
                 resp.raise_for_status()
                 body = resp.json()
@@ -1809,9 +1876,9 @@ class _SubmitWorker(QThread):
                     status = "unknown"
                     self.status_update.emit(f"Task {task_id} 응답 구조 확인: {body}")
                 self.status_update.emit(f"Task {task_id} 상태: {status} | 대기 중...")
-                if status in ("reported", "completed"):
+                if status in _STATUS_TERMINAL_OK:
                     break
-                if status in ("failed", "aborted"):
+                if status in _STATUS_TERMINAL_FAIL:
                     self.error.emit(f"샌드박스 분석 실패: status={status}")
                     return
 
@@ -1821,9 +1888,9 @@ class _SubmitWorker(QThread):
             # ── 3. 리포트 다운로드 ────────────────────────────────────────
             self.status_update.emit(f"리포트 다운로드 중... (Task {task_id})")
             resp = _requests.get(
-                f"{self._url}/apiv2/tasks/get/report/{task_id}/json/",
+                f"{self._url}{_ENDPOINT_REPORT_JSON.format(task_id=task_id)}",
                 headers=headers,
-                timeout=120,
+                timeout=_REPORT_TIMEOUT_S,
             )
             resp.raise_for_status()
 
@@ -1845,42 +1912,83 @@ class _AnalysisWorker(QThread):
     result_ready = pyqtSignal(str)
     error        = pyqtSignal(str)
 
+    # provider_id → 누락 시 설치 안내할 패키지명
+    _MISSING_PKG = {
+        "claude":     "anthropic",
+        "gemini":     "google-generativeai",
+        "openrouter": "requests",
+    }
+
     def __init__(self, prompt: str, api_key: str, provider: str) -> None:
         super().__init__()
         self._prompt   = prompt
         self._api_key  = api_key
-        self._provider = provider  # "claude" | "gemini"
+        self._provider = provider  # "claude" | "gemini" | "openrouter"
         self._cancelled  = False
 
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    # ── provider handlers ────────────────────────────────────────────────
+
+    def _call_claude(self, api_key: str, prompt: str) -> str:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=_LLM_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
+    def _call_gemini(self, api_key: str, prompt: str) -> str:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(prompt)
+        return response.text
+
+    def _call_openrouter(self, api_key: str, prompt: str) -> str:
+        import requests
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "deepseek/deepseek-r1",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": _LLM_MAX_TOKENS,
+            },
+            timeout=_REPORT_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
     def run(self) -> None:
+        handlers = {
+            "claude":     self._call_claude,
+            "gemini":     self._call_gemini,
+            "openrouter": self._call_openrouter,
+        }
+        handler = handlers.get(self._provider)
+        if handler is None:
+            if not self._cancelled:
+                self.error.emit(f"알 수 없는 프로바이더: {self._provider}")
+            return
         try:
-            if self._provider == "claude":
-                import anthropic
-                client = anthropic.Anthropic(api_key=self._api_key)
-                msg = client.messages.create(
-                    model="claude-opus-4-6",
-                    max_tokens=2000,
-                    messages=[{"role": "user", "content": self._prompt}],
-                )
-                if not self._cancelled:
-                    self.result_ready.emit(msg.content[0].text)
-            else:  # gemini
-                import google.generativeai as genai
-                genai.configure(api_key=self._api_key)
-                model = genai.GenerativeModel("gemini-2.5-flash")
-                response = model.generate_content(self._prompt)
-                if not self._cancelled:
-                    self.result_ready.emit(response.text)
+            text = handler(self._api_key, self._prompt)
+            if not self._cancelled:
+                self.result_ready.emit(text)
         except ImportError:
-            pkg = "anthropic" if self._provider == "claude" else "google-generativeai"
+            pkg = self._MISSING_PKG.get(self._provider, self._provider)
             if not self._cancelled:
                 self.error.emit(f"{pkg} 패키지가 없습니다.\n터미널에서: pip install {pkg}")
-        except Exception as e:
+        except Exception as exc:
             if not self._cancelled:
-                self.error.emit(str(e))
+                self.error.emit(f"{self._provider} 호출 실패: {exc}")
 
 
 class _LoadWorker(QThread):
@@ -1900,22 +2008,22 @@ class _LoadWorker(QThread):
             self.error.emit(str(e))
 
 
-class AnalysisDialog(QDialog):
-    """Claude / Gemini API 분석 결과 다이얼로그."""
+# ========================================================================
+# DIALOGS
+# ========================================================================
 
-    # keyring 미사용 시 평문 파일 폴백 경로
-    _KEY_PATHS = {
-        "claude": os.path.expanduser("~/.cape_analyzer_claude_key"),
-        "gemini": os.path.expanduser("~/.cape_analyzer_gemini_key"),
-    }
-    _KEYRING_SERVICE = "cape_analyzer"
+class AnalysisDialog(QDialog):
+    """Claude / Gemini / OpenRouter API 분석 결과 다이얼로그."""
+
     _PROVIDERS = [
-        ("Claude (Anthropic)", "claude"),
-        ("Gemini (Google)",    "gemini"),
+        ("Claude (Anthropic)",        "claude"),
+        ("Gemini (Google)",           "gemini"),
+        ("OpenRouter (DeepSeek-R1)",  "openrouter"),
     ]
     _PLACEHOLDERS = {
-        "claude": "sk-ant-...",
-        "gemini": "AIza...",
+        "claude":     "sk-ant-...",
+        "gemini":     "AIza...",
+        "openrouter": "sk-or-v1-...",
     }
 
     def __init__(self, data: ReportData, parent=None) -> None:
@@ -1924,9 +2032,11 @@ class AnalysisDialog(QDialog):
         self._worker  = None
         self._api_key = ""
         self.setWindowTitle("AI 분석")
-        self.resize(780, 620)
+        self.resize(*_WINDOW_SIZE_ANALYSIS)
         self._setup_ui()
-        self._load_key()
+        provider = self._current_provider()
+        self._key_input.setPlaceholderText(self._PLACEHOLDERS[provider])
+        self._status_lbl.setText("API 키를 입력하고 [분석 시작] 버튼을 누르세요.")
 
     # ── UI 구성 ───────────────────────────────────────────────────────────
 
@@ -1965,13 +2075,13 @@ class AnalysisDialog(QDialog):
             f"border:1px solid {GRAY_200}; border-radius:6px; padding:4px 8px;"
         )
         kf_lay.addWidget(self._key_input, 1)
-        key_save_btn = QPushButton("저장 후 분석")
-        key_save_btn.setStyleSheet(
+        start_btn = QPushButton("분석 시작")
+        start_btn.setStyleSheet(
             f"background:{BLACK}; color:{WHITE}; border-radius:50px;"
             f" padding:4px 14px; font-weight:600; border:none;"
         )
-        key_save_btn.clicked.connect(self._on_save_key)
-        kf_lay.addWidget(key_save_btn)
+        start_btn.clicked.connect(self._on_start_clicked)
+        kf_lay.addWidget(start_btn)
         lay.addWidget(self._key_frame)
 
         # 상태 레이블
@@ -2034,40 +2144,11 @@ class AnalysisDialog(QDialog):
         self._key_input.setPlaceholderText(self._PLACEHOLDERS[provider])
         self._result_box.clear()
         self._api_key = ""
-        self._load_key()
+        self._status_lbl.setText("API 키를 입력하고 [분석 시작] 버튼을 누르세요.")
 
-    # ── API 키 관리 ───────────────────────────────────────────────────────
+    # ── 분석 트리거 ───────────────────────────────────────────────────────
 
-    def _load_key(self) -> None:
-        provider = self._current_provider()
-        key = ""
-        # 1순위: OS 키체인 (Windows Credential Manager / macOS Keychain)
-        if _KEYRING_OK:
-            try:
-                stored = _keyring.get_password(self._KEYRING_SERVICE, provider)
-                if stored:
-                    key = stored
-            except Exception:
-                pass
-        # 2순위: 평문 파일 폴백
-        if not key:
-            path = self._KEY_PATHS[provider]
-            if os.path.exists(path):
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        key = f.read().strip()
-                except OSError:
-                    pass
-        if key:
-            self._api_key = key
-            self._key_frame.setVisible(False)
-            self._start_analysis()
-            return
-        self._key_input.setPlaceholderText(self._PLACEHOLDERS[provider])
-        self._key_frame.setVisible(True)
-        self._status_lbl.setText("API 키를 입력하세요. 저장되면 다음부터 자동으로 사용합니다.")
-
-    def _on_save_key(self) -> None:
+    def _on_start_clicked(self) -> None:
         provider = self._current_provider()
         key = self._key_input.text().strip()
         if not key:
@@ -2076,39 +2157,14 @@ class AnalysisDialog(QDialog):
         if provider == "claude" and not key.startswith("sk-ant-"):
             self._status_lbl.setText("올바른 Anthropic API 키를 입력하세요 (sk-ant-... 형식).")
             return
-        # 1순위: OS 키체인에 저장 — 평문 파일보다 안전
-        if _KEYRING_OK:
-            try:
-                _keyring.set_password(self._KEYRING_SERVICE, provider, key)
-                self._api_key = key
-                self._key_frame.setVisible(False)
-                self._start_analysis()
-                return
-            except Exception as e:
-                self._status_lbl.setText(f"키체인 저장 실패, 파일로 폴백: {e}")
-        # 2순위: 평문 파일 저장
-        try:
-            path = self._KEY_PATHS[provider]
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(key)
-            # 소유자만 읽기/쓰기 가능하도록 권한 설정 (Unix 계열)
-            try:
-                import stat
-                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-            except (OSError, AttributeError):
-                pass  # Windows에서는 무시
-        except OSError as e:
-            self._status_lbl.setText(f"키 저장 실패: {e}")
-            return
         self._api_key = key
-        self._key_frame.setVisible(False)
         self._start_analysis()
 
     # ── 분석 실행 ─────────────────────────────────────────────────────────
 
     def _start_analysis(self) -> None:
         if not self._api_key:
-            self._key_frame.setVisible(True)
+            self._status_lbl.setText("API 키를 입력하세요.")
             return
         if self._worker and self._worker.isRunning():
             return
@@ -2160,7 +2216,7 @@ class AnalysisDialog(QDialog):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.quit()
-            if not self._worker.wait(3000):  # 3초 내 자연 종료 대기
+            if not self._worker.wait(_WORKER_SHUTDOWN_MS):  # 자연 종료 대기
                 self._worker.terminate()     # 최후 수단
                 self._worker.wait()
         super().closeEvent(event)
@@ -2175,6 +2231,7 @@ class SubmitDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("샌드박스 제출")
         self.setMinimumWidth(520)
+        self.resize(*_WINDOW_SIZE_SUBMIT)
         self.setModal(True)
 
         self._worker: _SubmitWorker | None = None
@@ -2324,7 +2381,7 @@ class SubmitDialog(QDialog):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.quit()
-            self._worker.wait(3000)
+            self._worker.wait(_WORKER_SHUTDOWN_MS)
         self.reject()
 
     def _on_report_ready(self, tmp_path: str) -> None:
@@ -2344,7 +2401,7 @@ class SubmitDialog(QDialog):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.quit()
-            self._worker.wait(3000)
+            self._worker.wait(_WORKER_SHUTDOWN_MS)
         super().closeEvent(event)
 
 
