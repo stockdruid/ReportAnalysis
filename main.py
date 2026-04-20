@@ -44,6 +44,7 @@ from widgets import (
     MalScoreBadge, EmptyState, HashCard, InfoTable, SeverityBadge,
     BLACK, WHITE, GRAY_200, GRAY_500, GRAY_50, SEVERITY_COLORS, MINT,
 )
+from geoip import GeoIPResolver, GeoInfo, extract_all_ips
 
 
 # ========================================================================
@@ -776,16 +777,46 @@ class ATTACKTab(QWidget):
         webbrowser.open(self._MITRE_BASE + path)
 
 
+class _GeoLookupWorker(QThread):
+    """백그라운드 IP→국가 조회. 완료 시 dict[ip→GeoInfo] 시그널 발생."""
+    finished_with = pyqtSignal(dict)
+
+    def __init__(self, ips: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._ips = ips
+
+    def run(self) -> None:
+        print(f"[geoip] worker started, {len(self._ips)} IPs", flush=True)
+        try:
+            results = GeoIPResolver().lookup_many(self._ips)
+        except Exception as exc:
+            print(f"[geoip] worker exception: {type(exc).__name__}: {exc}", flush=True)
+            results = {}
+        print(f"[geoip] worker done, {len(results)} resolved", flush=True)
+        self.finished_with.emit(results)
+
+
 class NetworkTab(QWidget):
+    # IP를 가진 컬럼들의 (테이블, 컬럼인덱스) 매핑을 위한 placeholder 텍스트
+    _GEO_PENDING = "조회 중…"
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
         self._layout.addWidget(EmptyState("리포트를 열어주세요"))
+        self._geo_targets: list[tuple[InfoTable, int, int, str]] = []  # (table, row, col, ip)
+        self._geo_table: InfoTable | None = None
+        self._geo_status: QLabel | None = None
+        self._worker: _GeoLookupWorker | None = None
 
     def populate(self, data: ReportData) -> None:
         _clear_layout(self._layout)
+        self._geo_targets = []
+        self._geo_table = None
+        self._geo_status = None
+
         s = data.suricata
         total = sum(len(v) for v in s.values())
 
@@ -815,27 +846,127 @@ class NetworkTab(QWidget):
         sub.addTab(self._make_tls_tab(s["tls"]),        f"TLS ({len(s['tls'])})")
         sub.addTab(self._make_ssh_tab(s["ssh"]),        f"SSH ({len(s['ssh'])})")
         sub.addTab(self._make_files_tab(s["files"]),    f"Files ({len(s['files'])})")
+        sub.addTab(self._make_geo_tab(),                "Geolocation")
 
         self._layout.addWidget(sub)
 
+        # IP 지오로케이션 비동기 조회 시작 (Suricata + CAPE network 통합)
+        ips = extract_all_ips(s, data.network or {})
+        print(f"[geoip] NetworkTab.populate: extracted {len(ips)} IPs "
+              f"(suricata + network)", flush=True)
+        if ips:
+            print(f"[geoip] sample IPs: {ips[:10]}", flush=True)
+            self._dispatch_geo_lookup(ips)
+        else:
+            print("[geoip] no IPs found in suricata or network sections", flush=True)
+            if self._geo_status is not None:
+                self._geo_status.setText("조회할 IP 없음 (리포트에 네트워크 데이터 없음)")
+
+    def _dispatch_geo_lookup(self, ips: list[str]) -> None:
+        # 이전 워커 정리
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(100)
+        self._worker = _GeoLookupWorker(ips, self)
+        self._worker.finished_with.connect(self._on_geo_results)
+        self._worker.start()
+
+    def _on_geo_results(self, results: dict) -> None:
+        # 1) 각 테이블의 Country 셀 채우기
+        for table, row, col, ip in self._geo_targets:
+            info: GeoInfo | None = results.get(ip)
+            if info is None:
+                continue
+            cell = table.item(row, col)
+            if cell is not None:
+                cell.setText(info.display)
+                tip = f"{info.country or '?'}"
+                if info.city:
+                    tip += f", {info.city}"
+                if info.org:
+                    tip += f"\n{info.org}"
+                if info.asn:
+                    tip += f" ({info.asn})"
+                cell.setToolTip(tip)
+
+        # 2) Geolocation 집계 테이블 채우기
+        if self._geo_table is not None:
+            agg: dict[str, dict] = {}
+            for ip, info in results.items():
+                key = info.country_code or "??"
+                bucket = agg.setdefault(key, {
+                    "code": info.country_code,
+                    "name": info.country or ("Local" if key == "LO" else "Unknown"),
+                    "flag": info.flag,
+                    "ips": [],
+                    "orgs": set(),
+                })
+                bucket["ips"].append(ip)
+                if info.org:
+                    bucket["orgs"].add(info.org)
+
+            # 외국 → 로컬 → 미상 순으로 정렬, 같은 그룹 내 IP 수 내림차순
+            def _sort_key(item):
+                k, v = item
+                rank = 0 if k not in ("LO", "??") else (1 if k == "LO" else 2)
+                return (rank, -len(v["ips"]), v["name"])
+
+            for code, b in sorted(agg.items(), key=_sort_key):
+                flag_label = b["flag"] or ("🏠" if code == "LO" else "❓")
+                ips_preview = ", ".join(b["ips"][:5])
+                if len(b["ips"]) > 5:
+                    ips_preview += f", … (+{len(b['ips']) - 5})"
+                orgs_preview = ", ".join(sorted(b["orgs"])[:2]) if b["orgs"] else "—"
+                self._geo_table.add_row([
+                    flag_label,
+                    b["code"] or "—",
+                    b["name"],
+                    str(len(b["ips"])),
+                    ips_preview,
+                    orgs_preview,
+                ])
+            self._geo_table.fit_columns()
+
+        if self._geo_status is not None:
+            resolver = GeoIPResolver()
+            tags = []
+            if resolver.offline_available:
+                tags.append("오프라인 DB")
+            if resolver.online_available:
+                tags.append("ip-api.com")
+            mode = " + ".join(tags) if tags else "조회 불가 (requests/geoip2 미설치)"
+            self._geo_status.setText(f"조회 완료 — {len(results)}개 IP · 소스: {mode}")
+
+    def _register_geo_cell(self, table: InfoTable, row: int, col: int, ip: str) -> None:
+        ip = (ip or "").strip()
+        if not ip:
+            return
+        self._geo_targets.append((table, row, col, ip))
+
     # ── 서브탭 빌더 ──────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _make_alerts_tab(items: list) -> QWidget:
+    def _make_alerts_tab(self, items: list) -> QWidget:
         if not items:
             return EmptyState("Suricata Alert 없음")
-        t = InfoTable(["Timestamp", "Category", "Signature", "Severity", "Src IP", "Dst IP", "Proto"])
+        t = InfoTable(["Timestamp", "Category", "Signature", "Severity",
+                       "Src IP", "Src 국가", "Dst IP", "Dst 국가", "Proto"])
         t.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for e in items:
-            t.add_row([
+            src_ip = str(e.get("src_ip", e.get("src", "")))
+            dst_ip = str(e.get("dst_ip", e.get("dest", "")))
+            row = t.add_row([
                 str(e.get("timestamp", "")),
                 str(e.get("category", "")),
                 str(e.get("signature", "")),
                 str(e.get("severity", "")),
-                str(e.get("src_ip",   e.get("src", ""))),
-                str(e.get("dst_ip",   e.get("dest", ""))),
+                src_ip,
+                self._GEO_PENDING if src_ip else "—",
+                dst_ip,
+                self._GEO_PENDING if dst_ip else "—",
                 str(e.get("proto", "")),
             ])
+            self._register_geo_cell(t, row, 5, src_ip)
+            self._register_geo_cell(t, row, 7, dst_ip)
         t.fit_columns()
         return t
 
@@ -860,57 +991,64 @@ class NetworkTab(QWidget):
         t.fit_columns()
         return t
 
-    @staticmethod
-    def _make_http_tab(items: list) -> QWidget:
+    def _make_http_tab(self, items: list) -> QWidget:
         if not items:
             return EmptyState("HTTP 요청 없음")
-        t = InfoTable(["Timestamp", "Src", "Dst", "URI", "Method", "Status"])
-        t.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        t = InfoTable(["Timestamp", "Src", "Dst", "Dst 국가", "URI", "Method", "Status"])
+        t.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         for e in items:
-            src = f"{e.get('src', '')}:{e.get('sport', '')}"
-            dst = f"{e.get('dst', '')}:{e.get('dport', '')}"
-            t.add_row([
+            src_ip = str(e.get("src", ""))
+            dst_ip = str(e.get("dst", ""))
+            src = f"{src_ip}:{e.get('sport', '')}"
+            dst = f"{dst_ip}:{e.get('dport', '')}"
+            row = t.add_row([
                 str(e.get("timestamp", "")),
                 src, dst,
+                self._GEO_PENDING if dst_ip else "—",
                 str(e.get("uri", "")),
                 str(e.get("method", "")),
                 str(e.get("status", "")),
             ])
+            self._register_geo_cell(t, row, 3, dst_ip)
         t.fit_columns()
         return t
 
-    @staticmethod
-    def _make_tls_tab(items: list) -> QWidget:
+    def _make_tls_tab(self, items: list) -> QWidget:
         if not items:
             return EmptyState("TLS 세션 없음")
-        t = InfoTable(["Timestamp", "Src", "Dst", "Version", "SNI", "Subject"])
-        t.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        t = InfoTable(["Timestamp", "Src", "Dst", "Dst 국가", "Version", "SNI", "Subject"])
+        t.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         for e in items:
-            t.add_row([
+            dst_ip = str(e.get("dst", ""))
+            row = t.add_row([
                 str(e.get("timestamp", "")),
                 str(e.get("src", "")),
-                str(e.get("dst", "")),
+                dst_ip,
+                self._GEO_PENDING if dst_ip else "—",
                 str(e.get("version", "")),
                 str(e.get("sni", "")),
                 str(e.get("subject", "")),
             ])
+            self._register_geo_cell(t, row, 3, dst_ip)
         t.fit_columns()
         return t
 
-    @staticmethod
-    def _make_ssh_tab(items: list) -> QWidget:
+    def _make_ssh_tab(self, items: list) -> QWidget:
         if not items:
             return EmptyState("SSH 세션 없음")
-        t = InfoTable(["Timestamp", "Src", "Dst", "Client", "Server"])
-        t.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        t = InfoTable(["Timestamp", "Src", "Dst", "Dst 국가", "Client", "Server"])
+        t.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         for e in items:
-            t.add_row([
+            dst_ip = str(e.get("dst", ""))
+            row = t.add_row([
                 str(e.get("timestamp", "")),
                 str(e.get("src", "")),
-                str(e.get("dst", "")),
+                dst_ip,
+                self._GEO_PENDING if dst_ip else "—",
                 str(e.get("client", "")),
                 str(e.get("server", "")),
             ])
+            self._register_geo_cell(t, row, 3, dst_ip)
         t.fit_columns()
         return t
 
@@ -930,6 +1068,23 @@ class NetworkTab(QWidget):
             ])
         t.fit_columns()
         return t
+
+    def _make_geo_tab(self) -> QWidget:
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+
+        self._geo_status = QLabel("조회 중…")
+        self._geo_status.setStyleSheet(f"color: {GRAY_500}; font-size: 12px; padding: 2px 4px;")
+        v.addWidget(self._geo_status)
+
+        t = InfoTable(["", "Code", "국가", "IP 수", "IP 목록(샘플)", "조직(샘플)"])
+        t.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        t.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self._geo_table = t
+        v.addWidget(t)
+        return wrap
 
 
 class BehaviorTab(QWidget):
